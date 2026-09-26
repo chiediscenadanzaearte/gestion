@@ -5,23 +5,25 @@
 // ── CONFIGURAZIONE ───────────────────────────────────────
 import { auth, requireAuth, fsLoad, fsAdd, fsAddMany, fsUpdate, fsDelete, signOut } from './db.js?v=24';
 
-const COLL_SPESE      = 'spese';
-const COLL_CORSI      = 'corsi';
-const COLL_ALLIEVI    = 'allievi';
-const COLL_ISCRIZIONI = 'iscrizioni';
-const COLL_PRESENZE   = 'presenze';
-const COLL_PERSONALE  = 'personale';
+const COLL_SPESE       = 'spese';
+const COLL_CORSI       = 'corsi';
+const COLL_ABBONAMENTI = 'abbonamenti';
+const COLL_ALLIEVI     = 'allievi';
+const COLL_ISCRIZIONI  = 'iscrizioni';
+const COLL_PRESENZE    = 'presenze';
+const COLL_PERSONALE   = 'personale';
 
 const CAT_USCITE  = ['Affitto','Arredamento','Bollette','Cibo','Contributo collaboratore','Contributo team','Corsi di aggiornamento','Manutenzione','Strumenti','Utilità','Tasse','Trasporti','Versamento','Altro'];
 const CAT_ENTRATE = ['Allievi','Tesseramento','Sponsor','Versamento','Altro'];
 
 // ── STATO ────────────────────────────────────────────────
-let speseData     = [];
-let corsiData     = [];
-let allieviData   = [];
-let iscrizioniData= [];
-let presenzeData  = [];
-let personaleData = [];
+let speseData       = [];
+let corsiData       = [];
+let abbonamentiData = [];
+let allieviData     = [];
+let iscrizioniData  = [];
+let presenzeData    = [];
+let personaleData   = [];
 
 let currentType   = 'Uscite';
 let currentCat    = '';
@@ -62,6 +64,11 @@ const ymdToDate = (s) => {
   return m ? new Date(parseInt(m[1]), parseInt(m[2])-1, parseInt(m[3])) : null;
 };
 const dateToYmd = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+// scadenza tesseramento di default: un anno da oggi (tesseramento annuale)
+const defaultTesseramentoScad = () => {
+  const d = new Date(); d.setFullYear(d.getFullYear() + 1);
+  return dateToYmd(d);
+};
 
 const parseNum = (v) => {
   if (typeof v === 'number') return v;
@@ -100,10 +107,12 @@ const MOBILE_COLS = {
   speseTable:      { keep: [1, 2, 5] },   // Data, Descrizione, Importo
   allieviTable:    { keep: [1, 2] },      // Nome, Tipo
   iscrizioniTable: { keep: [1, 5, 8] },   // Allievo, Corso, Costo
-  corsiTable:      { keep: [1, 3] },      // Nome, Lezione singola
+  corsiTable:      { keep: [1, 3] },      // Nome, Tipo di abbonamento
+  abbonamentiTable:{ keep: [2, 5] },      // Nome, Lezione singola (col. 1 = maniglia trascinamento)
   repPresTable:    { keep: [1, 2, 3] },   // Data, Corso, Presenti
   riepIscTable:    { keep: [3, 6, 9] },   // Corso, Costo, Rimaste
   riepStoricoTable:{ keep: [1, 2] },      // Data, Corso (Note col tap)
+  presTabellaTable:{ keep: [1, 2, 4] },   // selezione, Data, Corso
 };
 
 function initMobileTables() {
@@ -271,18 +280,29 @@ async function loadSpese() {
 }
 
 // Normalizza i valori booleani ereditati dal vecchio Sheet (false/true → No/Sì)
-// e ripara il documento su Firestore la prima volta che lo incontra.
+// e ripara il documento su Firestore la prima volta che lo incontra. Inoltre,
+// se il tesseramento ha una scadenza già passata, torna automaticamente "No"
+// (sia in memoria che su Firestore).
 function normalizzaTesseramento(r) {
   const raw = r.tesseramento;
   const s = String(raw).trim().toLowerCase();
   let fixed = null;
   if (raw === false || s === 'false') fixed = 'No';
   else if (raw === true || s === 'true') fixed = 'Sì';
-  if (fixed !== null) {
-    fsUpdate(COLL_ALLIEVI, r._id, { tesseramento: fixed }).catch(() => {});
-    return fixed;
+  let tesseramento = fixed !== null ? fixed : (raw || '');
+
+  if (isTesserato(tesseramento) && r.tesseramentoScad) {
+    const oggi = new Date(); oggi.setHours(0,0,0,0);
+    const scad = ymdToDate(r.tesseramentoScad);
+    if (scad && scad < oggi) {
+      tesseramento = 'No';
+      fsUpdate(COLL_ALLIEVI, r._id, { tesseramento: 'No' }).catch(() => {});
+      return tesseramento;
+    }
   }
-  return raw || '';
+
+  if (fixed !== null) fsUpdate(COLL_ALLIEVI, r._id, { tesseramento: fixed }).catch(() => {});
+  return tesseramento;
 }
 
 async function loadAllievi() {
@@ -294,6 +314,7 @@ async function loadAllievi() {
     nomeCompleto: r.nomeCompleto || `${r.cognome || ''} ${r.nome || ''}`.trim(),
     tipo: r.tipo || '',
     tesseramento: normalizzaTesseramento(r),
+    tesseramentoScad: r.tesseramentoScad || '',
     cellulare: r.cellulare || '',
     mail: r.mail || '',
     indirizzo: r.indirizzo || '',
@@ -305,11 +326,12 @@ async function loadIscrizioni() {
   const rows = await fsLoad(COLL_ISCRIZIONI);
   iscrizioniData = rows.map(r => ({
     _id: r._id,
-    allievo:  r.allievo || '',
-    as:       r.as || '',
-    data:     r.data || '',
-    tipo:     r.tipo || '',
-    corso:    r.corso || '',
+    allievo:     r.allievo || '',
+    as:          r.as || '',
+    data:        r.data || '',
+    tipo:        r.tipo || '',
+    abbonamento: r.abbonamento || '', // assente sulle iscrizioni storiche pre-abbonamenti
+    corso:       r.corso || '',
     dataPag:  r.dataPag || '',
     pagato:   r.pagato || '',
     costo:    parseNum(r.costo),
@@ -321,30 +343,82 @@ async function loadIscrizioni() {
 // giorni di validità per le durate fisse dei corsi "a scadenza"
 const SCAD_TIPO_GIORNI = { Mensile: 30, Bimestrale: 60, Semestrale: 180, Annuale: 365 };
 
+// Legge Corsi (semplificati: nome, durata, abbonamenti ammessi) e Abbonamenti (solo
+// pagamento: il corso frequentato si sceglie sempre in iscrizione).
+// I vecchi corsi (prima di questo cambio) avevano i prezzi direttamente su di
+// loro (tipoPrezzo, x1/x4/x8/x12 o costoAbbonamento/scadenzaTipo): la prima
+// volta che li incontriamo generiamo per ciascuno un abbonamento "singolo"
+// con lo stesso nome, cosi' le iscrizioni gia' fatte (che puntano al corso per
+// nome, non ancora ad un abbonamento) restano valide senza dover essere
+// toccate — si risolvono per nome (vedi resolveAbbonamentoNome). I campi
+// legacy restano nel documento del corso (non vengono cancellati),
+// semplicemente non sono piu' letti/usati una volta migrato.
 async function loadCorsi() {
-  const rows = await fsLoad(COLL_CORSI);
-  corsiData = rows.map(r => ({
+  const rawCorsi = await fsLoad(COLL_CORSI);
+  await loadAbbonamenti();
+
+  // ordine di visualizzazione: prosegue dal massimo già assegnato
+  let prossimoOrdine = abbonamentiData.reduce((m, a) => Math.max(m, a.ordine ?? -1), -1) + 1;
+
+  for (const r of rawCorsi) {
+    // `migratoAbbonamento` è un segnaposto permanente: una volta migrato un
+    // corso, non si ritenta più — anche se in seguito l'abbonamento generato
+    // viene cancellato dall'operatore (altrimenti ricomparirebbe ad ogni
+    // caricamento, perché il corso legacy conserva per sempre `tipoPrezzo`).
+    if (!r.nome || r.tipoPrezzo === undefined || r.migratoAbbonamento) continue;
+
+    const giaMigrato = abbonamentiData.some(a => a.nome === r.nome);
+    if (!giaMigrato) {
+      const abDoc = {
+        nome: r.nome,
+        tipoErogazione: r.tipoPrezzo === 'scadenza' ? 'scadenza' : 'pacchetti',
+        contenuto: 'singolo',
+        ordine: prossimoOrdine++,
+        prova: parseNum(r.prova), x1: parseNum(r.x1), x4: parseNum(r.x4), x8: parseNum(r.x8), x12: parseNum(r.x12),
+        x4Scad: parseNum(r.x4Scad), x8Scad: parseNum(r.x8Scad), x12Scad: parseNum(r.x12Scad),
+        costoAbbonamento: parseNum(r.costoAbbonamento), scadenzaTipo: r.scadenzaTipo || '', scadenzaData: r.scadenzaData || '',
+        x5: parseNum(r.x5), x10: parseNum(r.x10),
+      };
+      try {
+        const id = await fsAdd(COLL_ABBONAMENTI, abDoc);
+        abbonamentiData.push({ _id: id, ...abDoc });
+      } catch (e) { continue; /* non marcarlo migrato: riproverà al prossimo caricamento */ }
+    }
+
+    try { await fsUpdate(COLL_CORSI, r._id, { migratoAbbonamento: true }); } catch (e) {}
+  }
+  abbonamentiData.sort((a, b) => (a.ordine ?? Infinity) - (b.ordine ?? Infinity) || a.nome.localeCompare(b.nome, 'it'));
+
+  corsiData = rawCorsi.map(r => ({
     _id: r._id,
-    nome:   r.nome || '',
+    nome: r.nome || '',
     durata: r.durata || '',
-    tipoPrezzo: r.tipoPrezzo === 'scadenza' ? 'scadenza' : 'pacchetti',
-    prova:  parseNum(r.prova),
-    x1:     parseNum(r.x1),
-    x4:     parseNum(r.x4),
-    x8:     parseNum(r.x8),
-    x12:    parseNum(r.x12),
-    // scadenza pacchetto in giorni dalla data di acquisto (0/vuoto = nessuna scadenza)
+    abbonamenti: Array.isArray(r.abbonamenti) ? r.abbonamenti : [], // vuoto = valido per qualsiasi abbonamento
+  })).filter(r => r.nome).sort((a, b) => a.nome.localeCompare(b.nome, 'it'));
+}
+
+async function loadAbbonamenti() {
+  const rows = await fsLoad(COLL_ABBONAMENTI);
+  abbonamentiData = rows.map(r => ({
+    _id: r._id,
+    nome: r.nome || '',
+    tipoErogazione: r.tipoErogazione === 'scadenza' ? 'scadenza' : 'pacchetti',
+    contenuto: r.contenuto === 'mix' ? 'mix' : 'singolo',
+    ordine: typeof r.ordine === 'number' ? r.ordine : null, // null = non ancora ordinato manualmente
+    prova: parseNum(r.prova),
+    x1:  parseNum(r.x1),
+    x4:  parseNum(r.x4),
+    x8:  parseNum(r.x8),
+    x12: parseNum(r.x12),
     x4Scad:  parseNum(r.x4Scad),
     x8Scad:  parseNum(r.x8Scad),
     x12Scad: parseNum(r.x12Scad),
-    // corsi "a scadenza": costo unico + durata (fissa o data unica per tutti)
     costoAbbonamento: parseNum(r.costoAbbonamento),
     scadenzaTipo:     r.scadenzaTipo || '',
     scadenzaData:     r.scadenzaData || '',
-    // legacy: vecchi pacchetti ancora presenti in iscrizioni storiche
-    x5:     parseNum(r.x5),
-    x10:    parseNum(r.x10),
-  })).filter(r => r.nome).sort((a,b) => a.nome.localeCompare(b.nome, 'it'));
+    x5:  parseNum(r.x5),
+    x10: parseNum(r.x10),
+  })).filter(r => r.nome).sort((a, b) => (a.ordine ?? Infinity) - (b.ordine ?? Infinity) || a.nome.localeCompare(b.nome, 'it'));
 }
 
 async function loadPresenze() {
@@ -375,7 +449,7 @@ function showSection(name) {
   if (name === 'generale')    renderGenerale();
   if (name === 'tabelle')     renderTabelle();
   if (name === 'allievi')     renderAllievi();
-  if (name === 'corsi')       renderCorsi();
+  if (name === 'corsi')       setCorsiSubTab(corsiSubTab);
   if (name === 'personale')   renderPersonale();
   if (name === 'iscrizioni')  renderIscrizioni();
   if (name === 'presenze')    renderPresenze();
@@ -446,7 +520,7 @@ function renderDashDaSaldare() {
         <div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px;">
           <span style="cursor:pointer;color:var(--accent);text-decoration:underline;text-underline-offset:3px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
             onclick="apriRiepilogoAllievo('${escHtml(r.allievo).replace(/'/g,"&#39;")}')">${escHtml(r.allievo)}</span>
-          <span style="color:var(--text-muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(r.corso)} (${escHtml(r.tipo)})</span>
+          <span style="color:var(--text-muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.corso ? escHtml(r.corso) : 'Mix'} (${escHtml(r.tipo)})</span>
           <span style="color:var(--red);font-variant-numeric:tabular-nums;white-space:nowrap;">${r.costo ? fmt(r.costo) : '—'}</span>
         </div>`).join('')}
     </div>`;
@@ -491,77 +565,115 @@ function renderDashProssime() {
     </div>`;
 }
 
-// Pacchetti (x4/x8/x12) e abbonamenti (corsi "a scadenza") in scadenza entro N giorni.
-// Ogni iscrizione è un caso a sé: scadenza e lezioni consumate si calcolano sulla
-// SUA data di acquisto, non si sommano tra corsi diversi né con altri pacchetti
-// dello stesso allievo. La prova non ha scadenza: mai in questo elenco.
-function pacchettiInScadenza(entroGiorni = 15) {
+// Pacchetti (x4/x8/x12) e abbonamenti (corsi "a scadenza") in scadenza entro N giorni,
+// PIÙ chi sta esaurendo le lezioni del pacchetto anche se la scadenza a calendario
+// (se configurata) è ancora lontana. Ogni iscrizione è un caso a sé: scadenza e
+// lezioni consumate si calcolano sulla SUA data di acquisto, non si sommano tra
+// corsi diversi né con altri pacchetti dello stesso allievo. La prova non ha
+// scadenza: mai in questo elenco.
+function pacchettiInScadenza(entroGiorni = 15, sogliaLezioni = 1) {
   const oggi = new Date(); oggi.setHours(0,0,0,0);
   const scadKeys = { x4: 'x4Scad', x8: 'x8Scad', x12: 'x12Scad' };
 
-  return iscrizioniData.reduce((acc, isc) => {
-    // corsi "a scadenza": la data è già risolta e salvata sull'iscrizione,
-    // nessun conteggio lezioni da mostrare
+  // solo il pacchetto/abbonamento più recente per allievo+corso: uno già
+  // sostituito da un acquisto successivo non deve restare per sempre
+  // "scaduto"/"esaurito" nell'elenco.
+  const latestPacchetto = new Map();
+  const latestScadenza  = new Map();
+  iscrizioniData.forEach(isc => {
+    const key = `${isc.allievo}|||${isc.corso}`;
     if (SCAD_TIPI_SET.has(isc.tipo)) {
-      const scadenza = ymdToDate(isc.scadenza);
-      if (!scadenza) return acc;
-      const giorniRimanenti = Math.round((scadenza - oggi) / 86400000);
-      if (giorniRimanenti > entroGiorni) return acc;
-      acc.push({ allievo: isc.allievo, corso: isc.corso, tipo: isc.tipo, scadenza, giorniRimanenti, soloScadenza: true });
-      return acc;
+      const cur = latestScadenza.get(key);
+      if (!cur || isc.data > cur.data) latestScadenza.set(key, isc);
+    } else if (isc.tipo !== 'Prova') {
+      const cur = latestPacchetto.get(key);
+      if (!cur || isc.data > cur.data) latestPacchetto.set(key, isc);
     }
+  });
 
-    const scadKey = scadKeys[isc.tipo];
-    if (!scadKey) return acc; // Prova/x1 e legacy x5/x10: nessuna scadenza gestita
+  const risultati = [];
 
-    const corso = corsiData.find(c => c.nome === isc.corso);
-    const giorniScad = corso ? parseNum(corso[scadKey]) : 0;
-    if (!giorniScad) return acc; // scadenza non configurata per questo pacchetto
-
-    const dataAcquisto = ymdToDate(isc.data);
-    if (!dataAcquisto) return acc;
-
-    const scadenza = new Date(dataAcquisto);
-    scadenza.setDate(scadenza.getDate() + giorniScad);
+  latestScadenza.forEach(isc => {
+    const scadenza = ymdToDate(isc.scadenza);
+    if (!scadenza) return;
     const giorniRimanenti = Math.round((scadenza - oggi) / 86400000);
-    if (giorniRimanenti > entroGiorni) return acc;
+    if (giorniRimanenti > entroGiorni) return;
+    risultati.push({ allievo: isc.allievo, corso: isc.corso, tipo: isc.tipo, scadenza, giorniRimanenti, soloScadenza: true, motivo: 'data' });
+  });
 
+  latestPacchetto.forEach(isc => {
+    if (isc.tipo === 'x1') return; // lezione singola: nessun "pacchetto" da monitorare
     const lezioniTotali = lezioniDaTipo(isc.tipo);
-    // lezioni di QUESTO pacchetto: presenze nello stesso corso dalla sua data di acquisto in poi
-    const consumate = presenzeData.filter(p =>
-      p.corso === isc.corso && p.allievi.includes(isc.allievo) && p.giorno >= isc.data
-    ).length;
+    if (!lezioniTotali) return; // tipo non riconosciuto
+
+    // lezioni di QUESTO pacchetto (per gli abbonamenti "mix" contate su qualunque corso)
+    const consumate = presenzeConsumatePerIscrizione(isc);
     const rimanenti = Math.max(0, lezioniTotali - consumate);
 
-    acc.push({ allievo: isc.allievo, corso: isc.corso, tipo: isc.tipo, scadenza, giorniRimanenti, lezioniTotali, rimanenti, soloScadenza: false });
-    return acc;
-  }, []).sort((a,b) => a.giorniRimanenti - b.giorniRimanenti);
+    // scadenza a calendario del pacchetto, se l'abbonamento ne ha una configurata
+    const scadKey = scadKeys[isc.tipo];
+    const ab = scadKey ? abbonamentiData.find(a => a.nome === resolveAbbonamentoNome(isc)) : null;
+    const giorniScad = ab ? parseNum(ab[scadKey]) : 0;
+    let scadenza = null, giorniRimanenti = null;
+    if (giorniScad) {
+      const dataAcquisto = ymdToDate(isc.data);
+      if (dataAcquisto) {
+        scadenza = new Date(dataAcquisto);
+        scadenza.setDate(scadenza.getDate() + giorniScad);
+        giorniRimanenti = Math.round((scadenza - oggi) / 86400000);
+      }
+    }
+
+    const scadeAPresto         = giorniRimanenti !== null && giorniRimanenti <= entroGiorni;
+    const lezioniInEsaurimento = rimanenti <= sogliaLezioni;
+    if (!scadeAPresto && !lezioniInEsaurimento) return;
+
+    // se scade a breve E sta finendo le lezioni, la scadenza a calendario resta il motivo
+    // principale (è l'informazione più urgente); altrimenti segnaliamo l'esaurimento lezioni
+    risultati.push({
+      allievo: isc.allievo, corso: isc.corso, tipo: isc.tipo,
+      scadenza, giorniRimanenti, lezioniTotali, rimanenti, soloScadenza: false,
+      motivo: scadeAPresto ? 'data' : 'lezioni',
+    });
+  });
+
+  return risultati.sort((a, b) => {
+    const ga = a.giorniRimanenti ?? Infinity, gb = b.giorniRimanenti ?? Infinity;
+    if (ga !== gb) return ga - gb;
+    return (a.rimanenti ?? Infinity) - (b.rimanenti ?? Infinity);
+  });
 }
 
 function renderDashScadenze() {
   const el = $('dashScadenze');
   if (!el) return;
-  const pacchetti = pacchettiInScadenza(15);
+  const pacchetti = pacchettiInScadenza(15, 1);
 
   if (!pacchetti.length) {
-    el.innerHTML = '<p style="color:var(--text-dim);font-size:13px;padding:6px 0;">Nessun pacchetto in scadenza nei prossimi 15 giorni.</p>';
+    el.innerHTML = '<p style="color:var(--text-dim);font-size:13px;padding:6px 0;">Nessun pacchetto in scadenza né vicino all\'esaurimento.</p>';
     return;
   }
 
   el.innerHTML = `
     <div style="max-height:260px;overflow-y:auto;">
       ${pacchetti.map(p => {
-        const scaduto = p.giorniRimanenti < 0;
-        const badge = scaduto ? 'badge-red' : p.giorniRimanenti <= 3 ? 'badge-red' : 'badge-gold';
-        const label = scaduto ? 'Scaduto' : p.giorniRimanenti === 0 ? 'Oggi' : `${p.giorniRimanenti} gg`;
+        let badge, label;
+        if (p.motivo === 'data') {
+          const scaduto = p.giorniRimanenti < 0;
+          badge = scaduto ? 'badge-red' : p.giorniRimanenti <= 3 ? 'badge-red' : 'badge-gold';
+          label = scaduto ? 'Scaduto' : p.giorniRimanenti === 0 ? 'Oggi' : `${p.giorniRimanenti} gg`;
+        } else {
+          badge = p.rimanenti === 0 ? 'badge-red' : 'badge-gold';
+          label = p.rimanenti === 0 ? 'Esaurito' : `${p.rimanenti} lez.`;
+        }
         return `
         <div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px;">
           <span class="badge ${badge}" style="white-space:nowrap;width:64px;justify-content:center;flex-shrink:0;">${label}</span>
           <span style="cursor:pointer;color:var(--accent);text-decoration:underline;text-underline-offset:3px;flex-shrink:0;max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
             onclick="apriRiepilogoAllievo('${escHtml(p.allievo).replace(/'/g,"&#39;")}')">${escHtml(p.allievo)}</span>
-          <span style="color:var(--text-muted);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(p.corso)} (${p.tipo})</span>
+          <span style="color:var(--text-muted);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.corso ? escHtml(p.corso) : 'Mix'} (${p.tipo})</span>
           ${p.soloScadenza ? '' : `<span style="color:var(--text-dim);font-size:11px;white-space:nowrap;">${p.rimanenti}/${p.lezioniTotali} lez.</span>`}
-          <span style="color:var(--text-dim);font-size:11px;white-space:nowrap;">${fmtDate(dateToYmd(p.scadenza))}</span>
+          ${p.scadenza ? `<span style="color:var(--text-dim);font-size:11px;white-space:nowrap;">${fmtDate(dateToYmd(p.scadenza))}</span>` : ''}
         </div>`;
       }).join('')}
     </div>`;
@@ -648,7 +760,8 @@ async function updateTessAllievoGroup() {
   if (!grp) return;
   const show = currentCat === 'Tesseramento';
   grp.style.display = show ? '' : 'none';
-  if (!show) { $('fTessAllievo').value = ''; return; }
+  if (!show) { $('fTessAllievo').value = ''; $('fTessScad').value = ''; return; }
+  if (!$('fTessScad').value) $('fTessScad').value = defaultTesseramentoScad();
   if (!allieviData.length) await loadAllievi();
   const cur = $('fTessAllievo').value;
   $('fTessAllievo').innerHTML = '<option value="">— seleziona allievo —</option>' +
@@ -712,6 +825,7 @@ async function submitSpesa() {
   if (!currentCat)  return showFeedback('Seleziona una categoria.', true);
 
   const tessAllievo = currentCat === 'Tesseramento' ? ($('fTessAllievo')?.value || '') : '';
+  const tessScad    = currentCat === 'Tesseramento' ? ($('fTessScad')?.value || '') : '';
   const personale = currentCat === 'Contributo team' ? ($('fPersonale')?.value || '') : '';
   if (currentCat === 'Contributo team' && !personale) return showFeedback('Seleziona il personale.', true);
 
@@ -730,9 +844,10 @@ async function submitSpesa() {
       const a = allieviData.find(x => x.nomeCompleto === tessAllievo);
       if (a) {
         try {
-          await fsUpdate(COLL_ALLIEVI, a._id, { tesseramento: 'Sì' });
+          await fsUpdate(COLL_ALLIEVI, a._id, { tesseramento: 'Sì', tesseramentoScad: tessScad });
           a.tesseramento = 'Sì';
-          extra = ` Tesseramento di ${tessAllievo}: Sì.`;
+          a.tesseramentoScad = tessScad;
+          extra = ` Tesseramento di ${tessAllievo}: Sì${tessScad ? ` fino al ${fmtDate(tessScad)}` : ''}.`;
         } catch (e) {
           extra = ` (aggiornamento tesseramento di ${tessAllievo} fallito)`;
         }
@@ -1700,17 +1815,30 @@ function applyAllieviFilters() {
   if (!filtered.length) { $('allieviTableWrap').style.display='none'; $('allieviEmpty').style.display=''; return; }
   $('allieviEmpty').style.display='none'; $('allieviTableWrap').style.display='';
 
-  $('allieviBody').innerHTML = filtered.map(r => {
-    const c = getTipoColor(r.tipo);
-    const badgeStyle = `background:${c.bg};border:1px solid ${c.border};color:${c.text};display:inline-flex;align-items:center;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:500;`;
-    // nome cliccabile → riepilogo allievo
-    const nomeSafe = escHtml(r.nomeCompleto).replace(/'/g,'&#39;');
-    return `<tr>
+  renderAllieviTables(filtered);
+}
+
+const ALLIEVI_THEAD = `<colgroup>
+  <col style="width:24%"><col style="width:13%"><col style="width:13%">
+  <col style="width:14%"><col style="width:18%"><col style="width:18%">
+  <col style="width:72px">
+</colgroup><thead><tr>
+  <th>Nome completo</th><th>Tipo</th><th>Tesseramento</th>
+  <th>Cellulare</th><th>Mail</th><th>Note</th>
+  <th style="width:72px"></th>
+</tr></thead>`;
+
+function allievoRowHtml(r) {
+  const c = getTipoColor(r.tipo);
+  const badgeStyle = `background:${c.bg};border:1px solid ${c.border};color:${c.text};display:inline-flex;align-items:center;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:500;`;
+  // nome cliccabile → riepilogo allievo
+  const nomeSafe = escHtml(r.nomeCompleto).replace(/'/g,'&#39;');
+  return `<tr>
       <td style="font-weight:500;cursor:pointer;" onclick="apriRiepilogoAllievo('${nomeSafe}')" title="Apri riepilogo">
         <span style="color:var(--accent);text-decoration:underline;text-underline-offset:3px;">${escHtml(r.nomeCompleto)}</span>
       </td>
       <td><span style="${badgeStyle}">${escHtml(r.tipo)}</span></td>
-      <td style="color:var(--text-muted)">${escHtml(String(r.tesseramento))}</td>
+      <td style="color:var(--text-muted)">${escHtml(String(r.tesseramento))}${isTesserato(r.tesseramento) && r.tesseramentoScad ? `<br><span style="color:var(--text-dim);font-size:10px;">fino al ${fmtDate(r.tesseramentoScad)}</span>` : ''}</td>
       <td style="color:var(--text-muted)">${escHtml(r.cellulare)}</td>
       <td style="color:var(--text-muted)">${escHtml(r.mail)}</td>
       <td style="color:var(--text-dim);font-size:12px;">${escHtml(r.note)}</td>
@@ -1725,7 +1853,42 @@ function applyAllieviFilters() {
         </div>
       </td>
     </tr>`;
-  }).join('');
+}
+
+function renderAllieviTables(filtered) {
+  const raggruppa = ($('allieviRaggruppa')||{}).value || '';
+  const wrap = $('allieviTableWrap');
+
+  if (!raggruppa) {
+    wrap.innerHTML = `<div class="table-wrap">
+      <table class="data-table" id="allieviTable" data-mobile-cols="allieviTable">${ALLIEVI_THEAD}
+        <tbody id="allieviBody">${filtered.map(allievoRowHtml).join('')}</tbody>
+      </table>
+    </div>`;
+    return;
+  }
+
+  const gruppi = {};
+  filtered.forEach(r => {
+    const key = raggruppa === 'tipo' ? (r.tipo || '__none__') : (isTesserato(r.tesseramento) ? 'Tesserati' : 'Non tesserati');
+    (gruppi[key] ||= []).push(r);
+  });
+  const chiavi = Object.keys(gruppi).sort((a, b) => {
+    if (raggruppa === 'tesseramento') return a === 'Tesserati' ? -1 : b === 'Tesserati' ? 1 : 0;
+    if (a === '__none__') return 1;
+    if (b === '__none__') return -1;
+    return a.localeCompare(b, 'it', { numeric: true });
+  });
+
+  wrap.innerHTML = chiavi.map(k => `
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title">${k === '__none__' ? 'Senza tipo' : escHtml(k)} <span style="color:var(--text-dim);font-weight:400;">(${gruppi[k].length})</span></div>
+      <div class="table-wrap" style="margin-top:0;">
+        <table class="data-table" data-mobile-cols="allieviTable">${ALLIEVI_THEAD}
+          <tbody>${gruppi[k].map(allievoRowHtml).join('')}</tbody>
+        </table>
+      </div>
+    </div>`).join('');
 }
 
 function setTipoChip(val) {
@@ -1735,11 +1898,23 @@ function setTipoChip(val) {
   $('aTipo').value = val || '';
 }
 
+// Mostra/nasconde la data di scadenza in base al valore del select Tesseramento
+function updateTesseramentoScadGroup(prefillIfEmpty) {
+  const isSi = $('aTesseramento').value === 'Sì';
+  $('aTesseramentoScadGroup').style.display = isSi ? '' : 'none';
+  if (isSi && prefillIfEmpty && !$('aTesseramentoScad').value) {
+    $('aTesseramentoScad').value = defaultTesseramentoScad();
+  }
+  if (!isSi) $('aTesseramentoScad').value = '';
+}
+
 function openNewAllievo() {
   editAllieviIdx = null;
   $('modalAllieviTitle').textContent = 'Nuovo allievo';
   ['aCognome','aNome','aCellulare','aMail','aIndirizzo','aNote'].forEach(id => { $(id).value=''; });
   $('aTesseramento').value = 'No';
+  $('aTesseramentoScad').value = '';
+  updateTesseramentoScadGroup(false);
   setTipoChip('');
   $('modalAllieviOverlay').style.display = 'flex';
   $('aCognome').focus();
@@ -1753,6 +1928,8 @@ function openEditAllievo(id) {
   $('aCognome').value      = r.cognome;
   $('aNome').value         = r.nome;
   $('aTesseramento').value = isTesserato(r.tesseramento) ? 'Sì' : 'No';
+  $('aTesseramentoScad').value = r.tesseramentoScad || '';
+  updateTesseramentoScadGroup(false);
   $('aCellulare').value    = r.cellulare;
   $('aMail').value         = r.mail;
   $('aIndirizzo').value    = r.indirizzo;
@@ -1768,6 +1945,7 @@ async function saveAllievo() {
   const nome        = $('aNome').value.trim();
   const tipo        = $('aTipo').value.trim();
   const tesseramento= $('aTesseramento').value.trim();
+  const tesseramentoScad = tesseramento === 'Sì' ? $('aTesseramentoScad').value : '';
   const cellulare   = $('aCellulare').value.trim();
   const mail        = $('aMail').value.trim();
   const indirizzo   = $('aIndirizzo').value.trim();
@@ -1776,7 +1954,7 @@ async function saveAllievo() {
 
   if (!cognome && !nome) return appAlert('Inserisci almeno cognome o nome.');
 
-  const docData = { cognome, nome, nomeCompleto, tipo, tesseramento, cellulare, mail, indirizzo, note };
+  const docData = { cognome, nome, nomeCompleto, tipo, tesseramento, tesseramentoScad, cellulare, mail, indirizzo, note };
 
   try {
     const isNuovo = editAllieviIdx === null;
@@ -1790,6 +1968,7 @@ async function saveAllievo() {
     }
     closeAllieviModal();
     applyAllieviFilters();
+    refreshRiepilogoIfActive();
 
     // nuovo allievo → proponi subito l'iscrizione
     if (isNuovo && await appConfirm(`Allievo "${nomeCompleto}" salvato.\nVuoi procedere subito con l'iscrizione?`)) {
@@ -1817,32 +1996,63 @@ async function deleteAllievo(id) {
   }
 }
 
-// ── CORSI ─────────────────────────────────────────────────
+// ── CORSI (semplificati: nome, durata, abbonamenti ammessi) ──
 let editCorsoId = null;
+let corsiSubTab = 'corsi'; // 'corsi' | 'abbonamenti'
 
-const CORSI_THEAD = `<thead><tr>
-  <th>Nome</th><th>Durata</th>
-  <th style="text-align:right">Lezione singola</th>
-  <th style="text-align:right">x4</th><th style="text-align:right">x8</th><th style="text-align:right">x12</th>
+const CORSI_THEAD = `<colgroup>
+  <col style="width:26%"><col style="width:16%"><col style="width:38%">
+  <col style="width:70px">
+</colgroup><thead><tr>
+  <th>Nome</th><th>Durata</th><th>Tipo di abbonamento</th>
   <th style="width:70px"></th>
 </tr></thead>`;
 
+// Colori stabili per corso (in ordine alfabetico, come corsiData), usati nel
+// calendario presenze per distinguere a colpo d'occhio le lezioni dei vari corsi.
+const CORSO_COLORS = [
+  { bg:'rgba(201,169,110,0.18)', border:'#c9a96e', text:'#c9a96e' },
+  { bg:'rgba(92,184,92,0.18)',   border:'#5cb85c', text:'#5cb85c' },
+  { bg:'rgba(91,192,222,0.18)',  border:'#5bc0de', text:'#5bc0de' },
+  { bg:'rgba(155,89,182,0.18)',  border:'#9b59b6', text:'#9b59b6' },
+  { bg:'rgba(230,126,34,0.18)',  border:'#e67e22', text:'#e67e22' },
+  { bg:'rgba(26,188,156,0.18)',  border:'#1abc9c', text:'#1abc9c' },
+  { bg:'rgba(52,152,219,0.18)',  border:'#3498db', text:'#3498db' },
+  { bg:'rgba(231,76,60,0.18)',   border:'#e74c3c', text:'#e74c3c' },
+  { bg:'rgba(241,196,15,0.18)',  border:'#f1c40f', text:'#c9a20b' },
+  { bg:'rgba(149,165,166,0.18)', border:'#95a5a6', text:'#95a5a6' },
+];
+function getCorsoColor(nome) {
+  if (!nome) return { bg:'rgba(255,255,255,0.05)', border:'#555', text:'#888' };
+  let idx = corsiData.findIndex(c => c.nome === nome);
+  if (idx < 0) {
+    // corso non (più) presente in anagrafica: hash del nome per un colore comunque stabile
+    idx = [...nome].reduce((h, ch) => h + ch.charCodeAt(0), 0);
+  }
+  return CORSO_COLORS[idx % CORSO_COLORS.length];
+}
+
+// Stesso schema colori, ma per abbonamento (badge "Tipo di abbonamento" sui corsi)
+function getAbbonamentoColor(nome) {
+  if (!nome) return { bg:'rgba(255,255,255,0.05)', border:'#555', text:'#888' };
+  let idx = abbonamentiData.findIndex(a => a.nome === nome);
+  if (idx < 0) idx = [...nome].reduce((h, ch) => h + ch.charCodeAt(0), 0);
+  return CORSO_COLORS[idx % CORSO_COLORS.length];
+}
+
 function corsoRowHtml(c) {
-  const cell = (v) => v ? fmt(v) : '<span style="color:var(--text-dim)">—</span>';
   const dash = '<span style="color:var(--text-dim)">—</span>';
-  const isScadenza = c.tipoPrezzo === 'scadenza';
+  const abbonamenti = c.abbonamenti || [];
+  const abbonamentiCell = abbonamenti.length
+    ? `<div style="display:flex;flex-wrap:wrap;gap:4px;">${abbonamenti.map(nome => {
+        const cc = getAbbonamentoColor(nome);
+        return `<span style="background:${cc.bg};border:1px solid ${cc.border};color:${cc.text};display:inline-flex;align-items:center;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:500;">${escHtml(nome)}</span>`;
+      }).join('')}</div>`
+    : '<span style="color:var(--text-dim);font-style:italic;">Tutti</span>';
   return `<tr>
       <td style="font-weight:500">${escHtml(c.nome)}</td>
       <td style="color:var(--text-muted)">${escHtml(c.durata) || dash}</td>
-      ${isScadenza ? `
-      <td style="text-align:right;font-variant-numeric:tabular-nums">${c.costoAbbonamento ? fmt(c.costoAbbonamento) : dash} <span style="color:var(--text-dim);font-size:11px;">/ ${escHtml(c.scadenzaTipo) || '—'}</span></td>
-      <td style="text-align:right">${dash}</td>
-      <td style="text-align:right">${dash}</td>
-      <td style="text-align:right">${dash}</td>` : `
-      <td style="text-align:right;font-variant-numeric:tabular-nums">${cell(c.x1)}</td>
-      <td style="text-align:right;font-variant-numeric:tabular-nums">${cell(c.x4)}</td>
-      <td style="text-align:right;font-variant-numeric:tabular-nums">${cell(c.x8)}</td>
-      <td style="text-align:right;font-variant-numeric:tabular-nums">${cell(c.x12)}</td>`}
+      <td>${abbonamentiCell}</td>
       <td>
         <div style="display:flex;gap:4px;">
           <button class="btn-table" onclick="openEditCorso('${c._id}')" title="Modifica">
@@ -1871,7 +2081,7 @@ function renderCorsiTables() {
   const raggruppa = $('corsiRaggruppa').value;
   const wrap = $('corsiTableWrap');
 
-  if (raggruppa !== 'durata') {
+  if (!raggruppa) {
     wrap.innerHTML = `<div class="table-wrap">
       <table class="data-table" id="corsiTable" data-mobile-cols="corsiTable">${CORSI_THEAD}
         <tbody id="corsiBody">${corsiData.map(corsoRowHtml).join('')}</tbody>
@@ -1881,19 +2091,29 @@ function renderCorsiTables() {
   }
 
   const gruppi = {};
-  corsiData.forEach(c => {
-    const key = c.durata.trim() || '__none__';
-    (gruppi[key] ||= []).push(c);
-  });
+  if (raggruppa === 'abbonamento') {
+    // un corso senza restrizioni li accetta tutti: compare in ogni gruppo
+    // ("Tutti gli abbonamenti") invece che in un unico "senza tipo"
+    corsiData.forEach(c => {
+      const lista = (c.abbonamenti && c.abbonamenti.length) ? c.abbonamenti : ['__tutti__'];
+      lista.forEach(nome => { (gruppi[nome] ||= []).push(c); });
+    });
+  } else {
+    corsiData.forEach(c => {
+      const key = c.durata.trim() || '__none__';
+      (gruppi[key] ||= []).push(c);
+    });
+  }
   const chiavi = Object.keys(gruppi).sort((a, b) => {
-    if (a === '__none__') return 1;
-    if (b === '__none__') return -1;
+    if (a === '__none__' || a === '__tutti__') return 1;
+    if (b === '__none__' || b === '__tutti__') return -1;
     return a.localeCompare(b, 'it', { numeric: true });
   });
+  const etichetta = raggruppa === 'abbonamento' ? 'Senza restrizioni (tutti gli abbonamenti)' : 'Durata non specificata';
 
   wrap.innerHTML = chiavi.map(k => `
     <div class="card" style="margin-bottom:16px;">
-      <div class="card-title">${k === '__none__' ? 'Durata non specificata' : escHtml(k)}</div>
+      <div class="card-title">${(k === '__none__' || k === '__tutti__') ? etichetta : escHtml(k)}</div>
       <div class="table-wrap" style="margin-top:0;">
         <table class="data-table" data-mobile-cols="corsiTable">${CORSI_THEAD}
           <tbody>${gruppi[k].map(corsoRowHtml).join('')}</tbody>
@@ -1902,31 +2122,30 @@ function renderCorsiTables() {
     </div>`).join('');
 }
 
-// Toggle A pacchetti / A scadenza nella modale corso
-function setCorsoTipoPrezzo(val) {
-  document.querySelectorAll('#cTipoPrezzoGrid .cat-chip').forEach(c => {
-    c.classList.toggle('active', c.dataset.tipoprezzo === val);
+// Griglia multi-selezione "Tipo di abbonamento" nella modale corso: le opzioni
+// sono gli abbonamenti esistenti, ognuno attivabile/disattivabile a piacere
+// (nessuna selezione = corso valido per qualsiasi abbonamento).
+function populateCorsoAbbonamentiGrid(selected) {
+  const selSet = new Set(selected || []);
+  const grid = $('cAbbonamentiGrid');
+  grid.innerHTML = abbonamentiData.map(a =>
+    `<button type="button" class="cat-chip${selSet.has(a.nome) ? ' active' : ''}" data-abnome="${escHtml(a.nome)}">${escHtml(a.nome)}</button>`
+  ).join('');
+  $('cAbbonamenti').value = JSON.stringify([...selSet]);
+  grid.querySelectorAll('.cat-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      chip.classList.toggle('active');
+      const scelti = [...grid.querySelectorAll('.cat-chip.active')].map(c => c.dataset.abnome);
+      $('cAbbonamenti').value = JSON.stringify(scelti);
+    });
   });
-  $('cTipoPrezzo').value = val;
-  $('cPacchettiGroup').style.display = val === 'scadenza' ? 'none' : '';
-  $('cScadenzaGroup').style.display  = val === 'scadenza' ? '' : 'none';
-}
-
-// Chip durata (Mensile/Bimestrale/Semestrale/Annuale/Personalizzata) nella modale corso
-function setCorsoScadTipo(val) {
-  document.querySelectorAll('#cScadTipoGrid .cat-chip').forEach(c => {
-    c.classList.toggle('active', c.dataset.scadtipo === val);
-  });
-  $('cScadTipo').value = val;
-  $('cScadDataGroup').style.display = val === 'Personalizzata' ? '' : 'none';
 }
 
 function openNewCorso() {
   editCorsoId = null;
   $('modalCorsoTitle').textContent = 'Nuovo corso';
-  ['cNome','cDurata','cX1','cX4','cX8','cX12','cX4Scad','cX8Scad','cX12Scad','cCostoAbb','cScadData'].forEach(id => { $(id).value=''; });
-  setCorsoTipoPrezzo('pacchetti');
-  setCorsoScadTipo('');
+  ['cNome','cDurata'].forEach(id => { $(id).value=''; });
+  populateCorsoAbbonamentiGrid([]);
   $('modalCorsoOverlay').style.display = 'flex';
   $('cNome').focus();
 }
@@ -1938,42 +2157,21 @@ function openEditCorso(id) {
   $('modalCorsoTitle').textContent = 'Modifica corso';
   $('cNome').value   = c.nome;
   $('cDurata').value = c.durata;
-  $('cX1').value  = c.x1  || '';
-  $('cX4').value  = c.x4  || '';
-  $('cX8').value  = c.x8  || '';
-  $('cX12').value = c.x12 || '';
-  $('cX4Scad').value  = c.x4Scad  || '';
-  $('cX8Scad').value  = c.x8Scad  || '';
-  $('cX12Scad').value = c.x12Scad || '';
-  $('cCostoAbb').value = c.costoAbbonamento || '';
-  $('cScadData').value = c.scadenzaData || '';
-  setCorsoTipoPrezzo(c.tipoPrezzo);
-  setCorsoScadTipo(c.scadenzaTipo);
+  populateCorsoAbbonamentiGrid(c.abbonamenti);
   $('modalCorsoOverlay').style.display = 'flex';
 }
 
 function closeCorsoModal() { $('modalCorsoOverlay').style.display = 'none'; editCorsoId = null; }
 
 async function saveCorso() {
-  const nome   = $('cNome').value.trim();
-  const durata = $('cDurata').value.trim();
-  const tipoPrezzo = $('cTipoPrezzo').value;
-  const x1  = parseFloat($('cX1').value)  || 0;
-  const x4  = parseFloat($('cX4').value)  || 0;
-  const x8  = parseFloat($('cX8').value)  || 0;
-  const x12 = parseFloat($('cX12').value) || 0;
-  const x4Scad  = parseInt($('cX4Scad').value)  || 0;
-  const x8Scad  = parseInt($('cX8Scad').value)  || 0;
-  const x12Scad = parseInt($('cX12Scad').value) || 0;
-  const costoAbbonamento = parseFloat($('cCostoAbb').value) || 0;
-  const scadenzaTipo = $('cScadTipo').value;
-  const scadenzaData = scadenzaTipo === 'Personalizzata' ? $('cScadData').value : '';
+  const nome    = $('cNome').value.trim();
+  const durata  = $('cDurata').value.trim();
+  let abbonamenti = [];
+  try { abbonamenti = JSON.parse($('cAbbonamenti').value || '[]'); } catch (e) { abbonamenti = []; }
 
   if (!nome) return appAlert('Inserisci il nome del corso.');
-  if (tipoPrezzo === 'scadenza' && !scadenzaTipo) return appAlert('Seleziona la durata dell\'abbonamento.');
-  if (tipoPrezzo === 'scadenza' && scadenzaTipo === 'Personalizzata' && !scadenzaData) return appAlert('Inserisci la data di scadenza.');
 
-  const docData = { nome, durata, tipoPrezzo, x1, x4, x8, x12, x4Scad, x8Scad, x12Scad, costoAbbonamento, scadenzaTipo, scadenzaData };
+  const docData = { nome, durata, abbonamenti };
 
   // rinomina: iscrizioni e presenze puntano al corso per nome
   if (editCorsoId !== null) {
@@ -1987,7 +2185,7 @@ async function saveCorso() {
   try {
     if (editCorsoId === null) {
       const id = await fsAdd(COLL_CORSI, docData);
-      corsiData.push({ _id: id, prova: 0, x5: 0, x10: 0, ...docData });
+      corsiData.push({ _id: id, ...docData });
     } else {
       await fsUpdate(COLL_CORSI, editCorsoId, docData);
       const c = corsiData.find(c => c._id === editCorsoId);
@@ -2016,6 +2214,306 @@ async function deleteCorso(id) {
   } catch (e) {
     appAlert('Errore durante l\'eliminazione.');
   }
+}
+
+// ── ABBONAMENTI (prezzi: a pacchetti o a scadenza; contenuto: singolo corso o mix) ──
+let editAbbonamentoId = null;
+
+const ABBONAMENTI_THEAD = `<colgroup>
+  <col style="width:28px">
+  <col style="width:21%"><col style="width:15%"><col style="width:15%">
+  <col style="width:13%"><col style="width:13%"><col style="width:8%">
+  <col style="width:70px">
+</colgroup><thead><tr>
+  <th></th>
+  <th>Nome</th><th>Erogazione</th><th>Contenuto</th>
+  <th style="text-align:right">Lezione singola</th>
+  <th style="text-align:right">x4 / x8 / x12</th>
+  <th></th>
+  <th style="width:70px"></th>
+</tr></thead>`;
+
+const DRAG_HANDLE_SVG = `<svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor">
+  <circle cx="2.5" cy="2" r="1.3"/><circle cx="7.5" cy="2" r="1.3"/>
+  <circle cx="2.5" cy="7" r="1.3"/><circle cx="7.5" cy="7" r="1.3"/>
+  <circle cx="2.5" cy="12" r="1.3"/><circle cx="7.5" cy="12" r="1.3"/>
+</svg>`;
+
+// `draggable`: il riordino ha senso solo nella vista non raggruppata (l'ordine
+// è globale su tutti gli abbonamenti); nelle viste raggruppate la colonna
+// resta per l'allineamento ma senza maniglia trascinabile.
+function abbonamentoRowHtml(a, draggable = true) {
+  const dash = '<span style="color:var(--text-dim)">—</span>';
+  const contenutoLabel = a.contenuto === 'mix' ? 'Mix (qualsiasi corso)' : 'Singolo corso';
+  const isScadenza = a.tipoErogazione === 'scadenza';
+  const handleCell = draggable
+    ? `<td class="drag-handle-cell" draggable="true" title="Trascina per riordinare">${DRAG_HANDLE_SVG}</td>`
+    : `<td></td>`;
+  return `<tr data-ab-id="${a._id}">
+      ${handleCell}
+      <td style="font-weight:500">${escHtml(a.nome)}</td>
+      <td>${isScadenza ? 'A scadenza' : 'A pacchetti'}</td>
+      <td style="color:var(--text-muted)">${contenutoLabel}</td>
+      ${isScadenza ? `
+      <td style="text-align:right;font-variant-numeric:tabular-nums">${a.costoAbbonamento ? fmt(a.costoAbbonamento) : dash}</td>
+      <td style="color:var(--text-muted)">${escHtml(a.scadenzaTipo) || dash}</td>
+      <td></td>` : `
+      <td style="text-align:right;font-variant-numeric:tabular-nums">${a.x1 ? fmt(a.x1) : dash}</td>
+      <td style="text-align:right;font-variant-numeric:tabular-nums;color:var(--text-muted);font-size:12px;">${[a.x4,a.x8,a.x12].map(v=>v?fmt(v):'—').join(' / ')}</td>
+      <td></td>`}
+      <td>
+        <div style="display:flex;gap:4px;">
+          <button class="btn-table" onclick="openEditAbbonamento('${a._id}')" title="Modifica">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M8.5 1.5l2 2L4 10H2v-2L8.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="btn-table btn-del" onclick="deleteAbbonamento('${a._id}')" title="Elimina">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M4 3v6M8 3v6M3 3l.5 7h5L9 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </td>
+    </tr>`;
+}
+
+async function renderAbbonamenti() {
+  $('abbonamentiLoading').style.display=''; $('abbonamentiLoading').innerHTML = LOADING_HTML;
+  $('abbonamentiTableWrap').style.display='none'; $('abbonamentiEmpty').style.display='none';
+  if (!abbonamentiData.length && !corsiData.length) await loadCorsi();
+  $('abbonamentiLoading').style.display='none';
+
+  if (!abbonamentiData.length) { $('abbonamentiEmpty').style.display=''; return; }
+  $('abbonamentiTableWrap').style.display='';
+  renderAbbonamentiTables();
+}
+
+function renderAbbonamentiTables() {
+  const raggruppa = $('abbonamentiRaggruppa').value;
+  const wrap = $('abbonamentiTableWrap');
+
+  if (!raggruppa) {
+    wrap.innerHTML = `<div class="table-wrap">
+      <table class="data-table" id="abbonamentiTable" data-mobile-cols="abbonamentiTable">${ABBONAMENTI_THEAD}
+        <tbody id="abbonamentiBody">${abbonamentiData.map(a => abbonamentoRowHtml(a, true)).join('')}</tbody>
+      </table>
+    </div>`;
+    initAbbonamentiDragDrop();
+    return;
+  }
+
+  const gruppi = {};
+  abbonamentiData.forEach(a => {
+    const key = raggruppa === 'contenuto'
+      ? (a.contenuto === 'mix' ? 'Mix' : 'Singolo corso')
+      : (a.tipoErogazione === 'scadenza' ? 'A scadenza' : 'A pacchetti');
+    (gruppi[key] ||= []).push(a);
+  });
+  const chiavi = Object.keys(gruppi).sort((a, b) => a.localeCompare(b, 'it'));
+
+  wrap.innerHTML = chiavi.map(k => `
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title">${escHtml(k)} <span style="color:var(--text-dim);font-weight:400;">(${gruppi[k].length})</span></div>
+      <div class="table-wrap" style="margin-top:0;">
+        <table class="data-table" data-mobile-cols="abbonamentiTable">${ABBONAMENTI_THEAD}
+          <tbody>${gruppi[k].map(a => abbonamentoRowHtml(a, false)).join('')}</tbody>
+        </table>
+      </div>
+    </div>`).join('');
+}
+
+// Drag and drop per riordinare gli abbonamenti (solo vista non raggruppata,
+// dato che l'ordine è un'unica sequenza globale). La maniglia di trascinamento
+// è l'unico elemento draggable, cosí i click sui pulsanti Modifica/Elimina
+// nella stessa riga non vengono mai interpretati come inizio di un trascinamento.
+function initAbbonamentiDragDrop() {
+  const tbody = document.getElementById('abbonamentiBody');
+  if (!tbody) return;
+  let dragSrcId = null;
+
+  tbody.querySelectorAll('tr[data-ab-id]').forEach(tr => {
+    const handle = tr.querySelector('.drag-handle-cell');
+    if (!handle) return;
+
+    handle.addEventListener('dragstart', e => {
+      dragSrcId = tr.dataset.abId;
+      e.dataTransfer.effectAllowed = 'move';
+      tr.classList.add('dragging');
+    });
+    handle.addEventListener('dragend', () => {
+      tbody.querySelectorAll('tr').forEach(r => r.classList.remove('dragging', 'drag-over'));
+      dragSrcId = null;
+    });
+
+    tr.addEventListener('dragover', e => {
+      if (!dragSrcId || dragSrcId === tr.dataset.abId) return;
+      e.preventDefault();
+      tr.classList.add('drag-over');
+    });
+    tr.addEventListener('dragleave', () => tr.classList.remove('drag-over'));
+    tr.addEventListener('drop', e => {
+      e.preventDefault();
+      tr.classList.remove('drag-over');
+      const targetId = tr.dataset.abId;
+      if (!dragSrcId || dragSrcId === targetId) return;
+      reorderAbbonamenti(dragSrcId, targetId);
+    });
+  });
+}
+
+async function reorderAbbonamenti(srcId, targetId) {
+  const srcIdx = abbonamentiData.findIndex(a => a._id === srcId);
+  const targetIdx = abbonamentiData.findIndex(a => a._id === targetId);
+  if (srcIdx === -1 || targetIdx === -1) return;
+
+  const [moved] = abbonamentiData.splice(srcIdx, 1);
+  abbonamentiData.splice(targetIdx, 0, moved);
+  abbonamentiData.forEach((a, i) => { a.ordine = i; });
+  renderAbbonamentiTables();
+
+  try {
+    await Promise.all(abbonamentiData.map((a, i) => fsUpdate(COLL_ABBONAMENTI, a._id, { ordine: i })));
+  } catch (e) {
+    appAlert('Errore durante il salvataggio del nuovo ordine.');
+  }
+}
+
+// Toggle Singolo corso / Mix nella modale abbonamento
+function setAbbonamentoContenuto(val) {
+  document.querySelectorAll('#abContenutoGrid .cat-chip').forEach(c => {
+    c.classList.toggle('active', c.dataset.contenuto === val);
+  });
+  $('abContenuto').value = val;
+}
+
+// Toggle A pacchetti / A scadenza nella modale abbonamento
+function setAbbonamentoTipoErogazione(val) {
+  document.querySelectorAll('#abTipoErogazioneGrid .cat-chip').forEach(c => {
+    c.classList.toggle('active', c.dataset.erogazione === val);
+  });
+  $('abTipoErogazione').value = val;
+  $('abPacchettiGroup').style.display = val === 'scadenza' ? 'none' : '';
+  $('abScadenzaGroup').style.display  = val === 'scadenza' ? '' : 'none';
+}
+
+// Chip durata (Mensile/Bimestrale/Semestrale/Annuale/Personalizzata) nella modale abbonamento
+function setAbbonamentoScadTipo(val) {
+  document.querySelectorAll('#abScadTipoGrid .cat-chip').forEach(c => {
+    c.classList.toggle('active', c.dataset.scadtipo === val);
+  });
+  $('abScadTipo').value = val;
+  $('abScadDataGroup').style.display = val === 'Personalizzata' ? '' : 'none';
+}
+
+function openNewAbbonamento() {
+  editAbbonamentoId = null;
+  $('modalAbbonamentoTitle').textContent = 'Nuovo abbonamento';
+  ['abNome','abX1','abX4','abX8','abX12','abX4Scad','abX8Scad','abX12Scad','abCostoAbb','abScadData'].forEach(id => { $(id).value=''; });
+  setAbbonamentoContenuto('singolo');
+  setAbbonamentoTipoErogazione('pacchetti');
+  setAbbonamentoScadTipo('');
+  $('modalAbbonamentoOverlay').style.display = 'flex';
+  $('abNome').focus();
+}
+
+function openEditAbbonamento(id) {
+  const a = abbonamentiData.find(a => a._id === id);
+  if (!a) return;
+  editAbbonamentoId = id;
+  $('modalAbbonamentoTitle').textContent = 'Modifica abbonamento';
+  $('abNome').value = a.nome;
+  $('abX1').value  = a.x1  || '';
+  $('abX4').value  = a.x4  || '';
+  $('abX8').value  = a.x8  || '';
+  $('abX12').value = a.x12 || '';
+  $('abX4Scad').value  = a.x4Scad  || '';
+  $('abX8Scad').value  = a.x8Scad  || '';
+  $('abX12Scad').value = a.x12Scad || '';
+  $('abCostoAbb').value = a.costoAbbonamento || '';
+  $('abScadData').value = a.scadenzaData || '';
+  setAbbonamentoContenuto(a.contenuto);
+  setAbbonamentoTipoErogazione(a.tipoErogazione);
+  setAbbonamentoScadTipo(a.scadenzaTipo);
+  $('modalAbbonamentoOverlay').style.display = 'flex';
+}
+
+function closeAbbonamentoModal() { $('modalAbbonamentoOverlay').style.display = 'none'; editAbbonamentoId = null; }
+
+async function saveAbbonamento() {
+  const nome = $('abNome').value.trim();
+  const contenuto = $('abContenuto').value;
+  const tipoErogazione = $('abTipoErogazione').value;
+  const x1  = parseFloat($('abX1').value)  || 0;
+  const x4  = parseFloat($('abX4').value)  || 0;
+  const x8  = parseFloat($('abX8').value)  || 0;
+  const x12 = parseFloat($('abX12').value) || 0;
+  const x4Scad  = parseInt($('abX4Scad').value)  || 0;
+  const x8Scad  = parseInt($('abX8Scad').value)  || 0;
+  const x12Scad = parseInt($('abX12Scad').value) || 0;
+  const costoAbbonamento = parseFloat($('abCostoAbb').value) || 0;
+  const scadenzaTipo = $('abScadTipo').value;
+  const scadenzaData = scadenzaTipo === 'Personalizzata' ? $('abScadData').value : '';
+
+  if (!nome) return appAlert('Inserisci il nome dell\'abbonamento.');
+  if (tipoErogazione === 'scadenza' && !scadenzaTipo) return appAlert('Seleziona la durata dell\'abbonamento.');
+  if (tipoErogazione === 'scadenza' && scadenzaTipo === 'Personalizzata' && !scadenzaData) return appAlert('Inserisci la data di scadenza.');
+
+  const docData = { nome, contenuto, tipoErogazione, x1, x4, x8, x12, x4Scad, x8Scad, x12Scad, costoAbbonamento, scadenzaTipo, scadenzaData };
+
+  // rinomina: le iscrizioni puntano all'abbonamento per nome
+  if (editAbbonamentoId !== null) {
+    const old = abbonamentiData.find(a => a._id === editAbbonamentoId);
+    if (old && old.nome !== nome) {
+      const usato = iscrizioniData.some(r => r.abbonamento === old.nome);
+      if (usato && !await appConfirm(`Stai rinominando "${old.nome}" in "${nome}".\nLe iscrizioni esistenti restano legate al vecchio nome. Continuare?`)) return;
+    }
+  }
+
+  try {
+    if (editAbbonamentoId === null) {
+      // nuovo: in coda all'ordine di visualizzazione attuale
+      const ordine = abbonamentiData.reduce((m, a) => Math.max(m, a.ordine ?? -1), -1) + 1;
+      const id = await fsAdd(COLL_ABBONAMENTI, { ...docData, ordine });
+      abbonamentiData.push({ _id: id, prova: 0, x5: 0, x10: 0, ...docData, ordine });
+    } else {
+      await fsUpdate(COLL_ABBONAMENTI, editAbbonamentoId, docData);
+      const a = abbonamentiData.find(a => a._id === editAbbonamentoId);
+      if (a) Object.assign(a, docData);
+    }
+    abbonamentiData.sort((a,b) => (a.ordine ?? Infinity) - (b.ordine ?? Infinity) || a.nome.localeCompare(b.nome, 'it'));
+    closeAbbonamentoModal();
+    renderAbbonamenti();
+  } catch (e) {
+    appAlert('Errore durante il salvataggio.');
+  }
+}
+
+async function deleteAbbonamento(id) {
+  const a = abbonamentiData.find(a => a._id === id);
+  if (!a) return;
+  const usato = iscrizioniData.some(r => r.abbonamento === a.nome);
+  const msg = usato
+    ? `L'abbonamento "${a.nome}" ha iscrizioni collegate (che NON verranno cancellate).\nEliminarlo comunque?`
+    : `Eliminare l'abbonamento "${a.nome}"?`;
+  if (!await appConfirm(msg)) return;
+  try {
+    await fsDelete(COLL_ABBONAMENTI, id);
+    abbonamentiData = abbonamentiData.filter(a => a._id !== id);
+    renderAbbonamenti();
+  } catch (e) {
+    appAlert('Errore durante l\'eliminazione.');
+  }
+}
+
+// Sotto-schede Corsi / Abbonamenti dentro la sezione "Corsi"
+function setCorsiSubTab(tab) {
+  corsiSubTab = tab;
+  document.querySelectorAll('#corsiSubTabSwitch .pres-view-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.subtab === tab);
+  });
+  $('corsiSubCorsi').style.display        = tab === 'corsi' ? '' : 'none';
+  $('corsiSubAbbonamenti').style.display  = tab === 'abbonamenti' ? '' : 'none';
+  $('btnNuovoCorso').style.display        = tab === 'corsi' ? '' : 'none';
+  $('btnNuovoAbbonamento').style.display  = tab === 'abbonamenti' ? '' : 'none';
+  if (tab === 'corsi') renderCorsi();
+  else renderAbbonamenti();
 }
 
 // ── PERSONALE ─────────────────────────────────────────────
@@ -2171,24 +2669,42 @@ function applyIscrizioniFilters() {
   if (!filtered.length) { $('iscrizioniTableWrap').style.display='none'; $('iscrizioniEmpty').style.display=''; return; }
   $('iscrizioniEmpty').style.display='none'; $('iscrizioniTableWrap').style.display='';
 
-  $('iscrizioniBody').innerHTML = filtered.map(r => {
-    const isProva = r.tipo === 'Prova';
-    const pag  = isPagato(r.pagato);
-    const tc   = TIPO_ISC_COLORS[r.tipo] || { bg:'rgba(255,255,255,0.05)', border:'#555', text:'#888' };
-    const tStyle = `background:${tc.bg};border:1px solid ${tc.border};color:${tc.text};display:inline-flex;align-items:center;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:500;`;
-    // la prova è gratuita: niente pagamento/costo da mostrare
-    const pagatoCell = isProva
-      ? '<span style="color:var(--text-dim)">—</span>'
-      : `<span class="badge ${pag?'badge-green':'badge-red'}">${pag?'Sì':'No'}</span>`;
-    const costoCell = isProva ? '<span style="color:var(--text-dim)">—</span>' : (r.costo?fmt(r.costo):'—');
-    return `<tr>
+  renderIscrizioniTables(filtered);
+}
+
+const ISCRIZIONI_THEAD = `<colgroup>
+  <col style="width:15%"><col style="width:9%"><col style="width:10%"><col style="width:11%">
+  <col style="width:13%"><col style="width:10%"><col style="width:7%"><col style="width:9%">
+  <col style="width:8%"><col style="width:72px">
+</colgroup><thead><tr>
+  <th>Allievo</th><th>A.S.</th><th>Data</th><th>Tipo</th><th>Corso</th>
+  <th>Data pag.</th><th>Pagato</th><th style="text-align:right">Costo</th><th>Note</th>
+  <th style="width:72px"></th>
+</tr></thead>`;
+
+// Corso di un'iscrizione: vuoto per gli abbonamenti "mix" (valgono su qualsiasi corso)
+function corsoDisplayHtml(corso) {
+  return corso ? escHtml(corso) : '<span style="color:var(--text-dim);font-style:italic;">Qualsiasi corso (mix)</span>';
+}
+
+function iscrizioneRowHtml(r) {
+  const isProva = r.tipo === 'Prova';
+  const pag  = isPagato(r.pagato);
+  const tc   = TIPO_ISC_COLORS[r.tipo] || { bg:'rgba(255,255,255,0.05)', border:'#555', text:'#888' };
+  const tStyle = `background:${tc.bg};border:1px solid ${tc.border};color:${tc.text};display:inline-flex;align-items:center;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:500;`;
+  // la prova è gratuita: niente pagamento/costo da mostrare
+  const pagatoCell = isProva
+    ? '<span style="color:var(--text-dim)">—</span>'
+    : `<span class="badge ${pag?'badge-green':'badge-red'}">${pag?'Sì':'No'}</span>`;
+  const costoCell = isProva ? '<span style="color:var(--text-dim)">—</span>' : (r.costo?fmt(r.costo):'—');
+  return `<tr>
       <td style="font-weight:500;cursor:pointer;" onclick="apriRiepilogoAllievo('${escHtml(r.allievo).replace(/'/g,"&#39;")}')" title="Apri riepilogo">
         <span style="color:var(--accent);text-decoration:underline;text-underline-offset:3px;">${escHtml(r.allievo)}</span>
       </td>
       <td><span class="badge badge-gold">${escHtml(r.as)}</span></td>
       <td>${fmtDate(r.data)}</td>
       <td><span style="${tStyle}">${escHtml(r.tipo)}</span></td>
-      <td>${escHtml(r.corso)}</td>
+      <td>${corsoDisplayHtml(r.corso)}</td>
       <td>${isProva ? '<span style="color:var(--text-dim)">—</span>' : fmtDate(r.dataPag)}</td>
       <td>${pagatoCell}</td>
       <td style="text-align:right;font-variant-numeric:tabular-nums">${costoCell}</td>
@@ -2204,7 +2720,47 @@ function applyIscrizioniFilters() {
         </div>
       </td>
     </tr>`;
-  }).join('');
+}
+
+function renderIscrizioniTables(filtered) {
+  const raggruppa = ($('iscrizioniRaggruppa')||{}).value || '';
+  const wrap = $('iscrizioniTableWrap');
+
+  if (!raggruppa) {
+    wrap.innerHTML = `<div class="table-wrap">
+      <table class="data-table" id="iscrizioniTable" data-mobile-cols="iscrizioniTable">${ISCRIZIONI_THEAD}
+        <tbody id="iscrizioniBody">${filtered.map(iscrizioneRowHtml).join('')}</tbody>
+      </table>
+    </div>`;
+    return;
+  }
+
+  const tesseratoMap = {};
+  allieviData.forEach(a => { tesseratoMap[a.nomeCompleto] = isTesserato(a.tesseramento); });
+  const gruppi = {};
+  filtered.forEach(r => {
+    const key = raggruppa === 'tipo' ? (r.tipo || '__none__')
+      : raggruppa === 'corso' ? (r.corso || '__none__')
+      : (tesseratoMap[r.allievo] ? 'Tesserati' : 'Non tesserati');
+    (gruppi[key] ||= []).push(r);
+  });
+  const chiavi = Object.keys(gruppi).sort((a, b) => {
+    if (raggruppa === 'tesseramento') return a === 'Tesserati' ? -1 : b === 'Tesserati' ? 1 : 0;
+    if (a === '__none__') return 1;
+    if (b === '__none__') return -1;
+    return a.localeCompare(b, 'it', { numeric: true });
+  });
+  const etichettaNone = raggruppa === 'corso' ? 'Qualsiasi corso (mix)' : 'Senza tipo';
+
+  wrap.innerHTML = chiavi.map(k => `
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title">${k === '__none__' ? etichettaNone : escHtml(k)} <span style="color:var(--text-dim);font-weight:400;">(${gruppi[k].length})</span></div>
+      <div class="table-wrap" style="margin-top:0;">
+        <table class="data-table" data-mobile-cols="iscrizioniTable">${ISCRIZIONI_THEAD}
+          <tbody>${gruppi[k].map(iscrizioneRowHtml).join('')}</tbody>
+        </table>
+      </div>
+    </div>`).join('');
 }
 
 // Se il riepilogo allievo è aperto, lo rigenera (dopo modifiche alle iscrizioni)
@@ -2221,50 +2777,101 @@ function isPagato(v) {
   return s === 'sì' || s === 'si' || s === 'true' || s === '1' || s === 'yes';
 }
 
-function getCostoCorso(nomeCorso, tipo) {
-  const corso = corsiData.find(c => c.nome === nomeCorso);
-  if (!corso) return 0;
-  const map = { 'Prova': corso.prova, 'x1': corso.x1, 'x4': corso.x4, 'x8': corso.x8, 'x12': corso.x12, 'x5': corso.x5, 'x10': corso.x10 };
+function getCostoAbbonamento(nomeAbbonamento, tipo) {
+  const ab = abbonamentiData.find(a => a.nome === nomeAbbonamento);
+  if (!ab) return 0;
+  const map = { 'Prova': ab.prova, 'x1': ab.x1, 'x4': ab.x4, 'x8': ab.x8, 'x12': ab.x12, 'x5': ab.x5, 'x10': ab.x10 };
   return map[tipo] || 0;
 }
 
 const SCAD_TIPI_SET = new Set(['Mensile', 'Bimestrale', 'Semestrale', 'Annuale', 'Personalizzata']);
 
-// Scadenza di un'iscrizione a un corso "a scadenza": data fissa (Personalizzata,
+// Scadenza di un'iscrizione a un abbonamento "a scadenza": data fissa (Personalizzata,
 // uguale per tutti) oppure data iscrizione + giorni della durata scelta.
-function calcolaScadenzaIscrizione(corso, dataIscrizione) {
-  if (!corso || corso.tipoPrezzo !== 'scadenza' || !corso.scadenzaTipo) return '';
-  if (corso.scadenzaTipo === 'Personalizzata') return corso.scadenzaData || '';
-  const giorni = SCAD_TIPO_GIORNI[corso.scadenzaTipo];
+function calcolaScadenzaIscrizione(abbonamento, dataIscrizione) {
+  if (!abbonamento || abbonamento.tipoErogazione !== 'scadenza' || !abbonamento.scadenzaTipo) return '';
+  if (abbonamento.scadenzaTipo === 'Personalizzata') return abbonamento.scadenzaData || '';
+  const giorni = SCAD_TIPO_GIORNI[abbonamento.scadenzaTipo];
   const d = ymdToDate(dataIscrizione);
   if (!giorni || !d) return '';
   d.setDate(d.getDate() + giorni);
   return dateToYmd(d);
 }
 
-// Adatta la modale iscrizione al corso selezionato: chip pacchetti oppure
-// riquadro informativo con l'abbonamento (nessuna scelta, la decide il corso).
-function updateIscrizioneCorsoMode() {
-  const corso = corsiData.find(c => c.nome === $('iCorso').value);
-  const isScadenza = !!corso && corso.tipoPrezzo === 'scadenza';
+// Corso selezionabile in base all'abbonamento scelto: "singolo" mostra solo il
+// corso collegato (già selezionato), "mix" lascia scegliere liberamente tra tutti.
+// Il corso si sceglie sempre liberamente qui, indipendentemente dall'abbonamento
+// (l'abbonamento riguarda solo il pagamento): il menu si popola una volta sola
+// all'apertura della modale, non ad ogni cambio di abbonamento.
+// Corso selezionabile in iscrizione: solo quelli che accettano l'abbonamento
+// attualmente scelto (un corso senza restrizioni ne accetta qualunque).
+// `selected`, se indicato, è il valore da preselezionare (usato in apertura
+// modale); altrimenti si prova a mantenere la scelta corrente se resta valida
+// dopo il filtro (usato quando si cambia abbonamento a modale già aperta).
+function populateCorsoSelectIscrizione(selected) {
+  const nomeAb = $('iAbbonamento').value;
+  const sel = $('iCorso');
+  const daMantenere = selected !== undefined ? selected : sel.value;
+  let corsiValidi = corsiData.filter(c => !nomeAb || !c.abbonamenti?.length || c.abbonamenti.includes(nomeAb));
+  // non far sparire dal menu il corso già salvato sull'iscrizione anche se nel
+  // frattempo non accetta più questo abbonamento: si eviterebbe altrimenti di
+  // perdere silenziosamente il dato aprendo in modifica un'iscrizione storica
+  if (daMantenere && !corsiValidi.some(c => c.nome === daMantenere)) {
+    const corsoEsistente = corsiData.find(c => c.nome === daMantenere);
+    if (corsoEsistente) corsiValidi = [corsoEsistente, ...corsiValidi];
+  }
+  sel.innerHTML = '<option value="">— seleziona corso —</option>' +
+    corsiValidi.map(c => `<option value="${escHtml(c.nome)}"${c.nome===daMantenere?' selected':''}>${escHtml(c.nome)}</option>`).join('');
+}
 
-  $('iTipoPacchettiGroup').style.display = isScadenza ? 'none' : '';
+// Adatta la modale iscrizione all'abbonamento selezionato: chip pacchetti oppure
+// riquadro informativo con la scadenza (nessuna scelta, la decide l'abbonamento).
+function updateIscrizioneAbbonamentoMode() {
+  const ab = abbonamentiData.find(a => a.nome === $('iAbbonamento').value);
+  // "Prova" è un abbonamento dedicato (non più un tipo scelto a mano tra i
+  // pacchetti): selezionandolo il tipo è fisso e la lezione è sempre gratuita.
+  const isProva     = !!ab && ab.nome === 'Prova';
+  const isScadenza  = !!ab && ab.tipoErogazione === 'scadenza' && !isProva;
+  const isMix       = !!ab && ab.contenuto === 'mix';
+
+  // abbonamento "mix": vale su qualsiasi corso, niente scelta qui — l'allievo
+  // comparirà nell'elenco presenze di ogni corso. Altrimenti il menu si filtra
+  // ai soli corsi che accettano l'abbonamento scelto.
+  $('iCorsoGroup').style.display   = isMix ? 'none' : '';
+  $('iCorsoMixInfo').style.display = isMix ? '' : 'none';
+  if (isMix) $('iCorso').value = '';
+  else populateCorsoSelectIscrizione();
+
+  $('iTipoPacchettiGroup').style.display = (isScadenza || isProva) ? 'none' : '';
   $('iTipoScadenzaInfo').style.display   = isScadenza ? '' : 'none';
+  $('iTipoProvaInfo').style.display      = isProva ? '' : 'none';
 
+  if (isProva) {
+    setTipoIscChip('Prova');
+    return;
+  }
   if (isScadenza) {
-    $('iTipo').value = corso.scadenzaTipo || '';
-    const scad = calcolaScadenzaIscrizione(corso, $('iData').value);
-    $('iTipoScadenzaLabel').textContent = corso.scadenzaTipo
-      ? `${corso.scadenzaTipo}${scad ? ' — scade il ' + fmtDate(scad) : ''}`
-      : 'Nessuna durata configurata su questo corso';
+    $('iTipo').value = ab.scadenzaTipo || '';
+    const scad = calcolaScadenzaIscrizione(ab, $('iData').value);
+    $('iTipoScadenzaLabel').textContent = ab.scadenzaTipo
+      ? `${ab.scadenzaTipo}${scad ? ' — scade il ' + fmtDate(scad) : ''}`
+      : 'Nessuna durata configurata su questo abbonamento';
     $('iPagatoRow').style.display = '';
     $('iCostoGroup').style.display = '';
-  } else if (SCAD_TIPI_SET.has($('iTipo').value)) {
-    // si arrivava da un corso "a scadenza": il tipo va riscelto con le chip pacchetti
+  } else if (SCAD_TIPI_SET.has($('iTipo').value) || $('iTipo').value === 'Prova') {
+    // si arrivava da un abbonamento "a scadenza" o "Prova": il tipo va riscelto con le chip pacchetti
     $('iTipo').value = '';
     document.querySelectorAll('#iTipoGrid .cat-chip').forEach(c => c.classList.remove('active'));
+    $('iPagatoRow').style.display = '';
+    $('iCostoGroup').style.display = '';
   }
   autoAggiornaCosto();
+}
+
+function populateAbbonamentiSelect(selected) {
+  const sel = $('iAbbonamento');
+  sel.innerHTML = '<option value="">— seleziona abbonamento —</option>' +
+    abbonamentiData.map(a => `<option value="${escHtml(a.nome)}"${a.nome===selected?' selected':''}>${escHtml(a.nome)}</option>`).join('');
 }
 
 function openNuovaIscrizione() {
@@ -2277,7 +2884,12 @@ function openNuovaIscrizione() {
   $('iNote').value = '';
   $('iCosto').value = '';
   setTipoIscChip('');
-  populateCorsiSelect();
+  populateAbbonamentiSelect('');
+  populateCorsoSelectIscrizione('');
+  updateIscrizioneAbbonamentoMode();
+  $('iTesseraAllievo').checked = false;
+  $('iTesseramentoScad').value = '';
+  updateIscTesseramentoGroup(false);
   $('modalIscOverlay').style.display = 'flex';
   $('iAllievo').focus();
 }
@@ -2295,8 +2907,25 @@ function openEditIscrizione(id) {
   $('iNote').value     = r.note;
   $('iCosto').value    = r.costo || '';
   setTipoIscChip(r.tipo);
-  populateCorsiSelect(r.corso);
+  // iscrizioni storiche (pre-abbonamenti): niente `abbonamento` salvato, l'operatore
+  // può assegnarlo; il corso resta comunque quello già registrato sull'iscrizione
+  populateAbbonamentiSelect(r.abbonamento || '');
+  populateCorsoSelectIscrizione(r.corso);
+  updateIscrizioneAbbonamentoMode();
+  // azione "una tantum": non è un dato salvato sull'iscrizione, si riparte scollegata
+  $('iTesseraAllievo').checked = false;
+  $('iTesseramentoScad').value = '';
+  updateIscTesseramentoGroup(false);
   $('modalIscOverlay').style.display = 'flex';
+}
+
+// Mostra/nasconde la data di scadenza legata alla checkbox "Aggiorna tesseramento"
+function updateIscTesseramentoGroup(prefillIfEmpty) {
+  const checked = $('iTesseraAllievo').checked;
+  $('iTesseramentoScadGroup').style.display = checked ? '' : 'none';
+  if (checked && prefillIfEmpty && !$('iTesseramentoScad').value) {
+    $('iTesseramentoScad').value = defaultTesseramentoScad();
+  }
 }
 
 // Chips Pagato Sì/No: mostra la data pagamento solo con "Sì"
@@ -2327,24 +2956,17 @@ function setTipoIscChip(val) {
   autoAggiornaCosto();
 }
 
-function populateCorsiSelect(selected) {
-  const sel = $('iCorso');
-  sel.innerHTML = '<option value="">— seleziona corso —</option>' +
-    corsiData.map(c => `<option value="${c.nome}"${c.nome===selected?' selected':''}>${c.nome}</option>`).join('');
-  updateIscrizioneCorsoMode();
-}
-
 function autoAggiornaCosto() {
-  const nomeCorso = $('iCorso') ? $('iCorso').value : '';
-  const tipo  = $('iTipo') ? $('iTipo').value : '';
+  const nomeAbbonamento = $('iAbbonamento') ? $('iAbbonamento').value : '';
+  const tipo = $('iTipo') ? $('iTipo').value : '';
   if (tipo === 'Prova') { $('iCosto').value = 0; return; } // la prova è sempre gratuita
-  const corso = corsiData.find(c => c.nome === nomeCorso);
-  if (corso && corso.tipoPrezzo === 'scadenza') {
-    $('iCosto').value = corso.costoAbbonamento || 0;
+  const ab = abbonamentiData.find(a => a.nome === nomeAbbonamento);
+  if (ab && ab.tipoErogazione === 'scadenza') {
+    $('iCosto').value = ab.costoAbbonamento || 0;
     return;
   }
-  if (nomeCorso && tipo) {
-    const costo = getCostoCorso(nomeCorso, tipo);
+  if (nomeAbbonamento && tipo) {
+    const costo = getCostoAbbonamento(nomeAbbonamento, tipo);
     if (costo) $('iCosto').value = costo;
   }
 }
@@ -2365,19 +2987,23 @@ function currentAnnoScolastico() {
 function closeIscModal() { $('modalIscOverlay').style.display = 'none'; editIscrizioniIdx = null; }
 
 async function saveIscrizione() {
-  const allievo = $('iAllievo').value.trim();
-  const as      = $('iAS').value.trim();
-  const data    = $('iData').value;
-  const tipo    = $('iTipo').value;
-  const corso   = $('iCorso').value;
-  const dataPag = $('iDataPag').value;
-  const pagato  = $('iPagato').value || 'No';
-  const costo   = parseFloat($('iCosto').value) || 0;
-  const note    = $('iNote').value.trim();
+  const allievo     = $('iAllievo').value.trim();
+  const as          = $('iAS').value.trim();
+  const data        = $('iData').value;
+  const tipo        = $('iTipo').value;
+  const abbonamento = $('iAbbonamento').value;
+  const abbonamentoObj = abbonamentiData.find(a => a.nome === abbonamento);
+  const isMix       = !!abbonamentoObj && abbonamentoObj.contenuto === 'mix';
+  const corso       = isMix ? '' : $('iCorso').value;
+  const dataPag     = $('iDataPag').value;
+  const pagato      = $('iPagato').value || 'No';
+  const costo       = parseFloat($('iCosto').value) || 0;
+  const note        = $('iNote').value.trim();
 
-  if (!allievo) return appAlert('Seleziona un allievo.');
-  if (!tipo)    return appAlert('Seleziona il tipo.');
-  if (!corso)   return appAlert('Seleziona un corso.');
+  if (!allievo)     return appAlert('Seleziona un allievo.');
+  if (!abbonamento) return appAlert('Seleziona un abbonamento.');
+  if (!tipo)        return appAlert('Seleziona il tipo.');
+  if (!corso && !isMix) return appAlert('Seleziona un corso.');
   if (pagato === 'Sì' && !dataPag) return appAlert('Inserisci la data di pagamento.');
 
   // una sola prova per allievo, indipendentemente dal corso
@@ -2386,11 +3012,15 @@ async function saveIscrizione() {
     if (altraProva) return appAlert(`"${allievo}" ha già usufruito della prova gratuita (in un altro corso o in questo).`);
   }
 
-  // corsi "a scadenza": nessun conteggio lezioni, solo la data di scadenza
-  const corsoObj = corsiData.find(c => c.nome === corso);
-  const scadenza = corsoObj && corsoObj.tipoPrezzo === 'scadenza' ? calcolaScadenzaIscrizione(corsoObj, data) : '';
+  // abbonamenti "a scadenza": nessun conteggio lezioni, solo la data di scadenza
+  // (la prova non ha mai scadenza, indipendentemente dall'erogazione dell'abbonamento "Prova")
+  const scadenza = tipo !== 'Prova' && abbonamentoObj && abbonamentoObj.tipoErogazione === 'scadenza'
+    ? calcolaScadenzaIscrizione(abbonamentoObj, data) : '';
 
-  const docData = { allievo, as, data, tipo, corso, dataPag: tipo === 'Prova' ? '' : dataPag, pagato: tipo === 'Prova' ? 'No' : pagato, costo, note, scadenza };
+  const docData = { allievo, as, data, tipo, abbonamento, corso, dataPag: tipo === 'Prova' ? '' : dataPag, pagato: tipo === 'Prova' ? 'No' : pagato, costo, note, scadenza };
+
+  const aggiornaTesseramento = $('iTesseraAllievo').checked;
+  const tesseramentoScad = $('iTesseramentoScad').value;
 
   try {
     if (editIscrizioniIdx === null) {
@@ -2401,6 +3031,19 @@ async function saveIscrizione() {
       const r = iscrizioniData.find(r => r._id === editIscrizioniIdx);
       if (r) Object.assign(r, docData);
     }
+
+    // aggiorna il tesseramento dell'allievo, se richiesto
+    if (aggiornaTesseramento) {
+      const a = allieviData.find(x => x.nomeCompleto === allievo);
+      if (a) {
+        try {
+          await fsUpdate(COLL_ALLIEVI, a._id, { tesseramento: 'Sì', tesseramentoScad });
+          a.tesseramento = 'Sì';
+          a.tesseramentoScad = tesseramentoScad;
+        } catch (e) {}
+      }
+    }
+
     closeIscModal(); applyIscrizioniFilters();
     refreshRiepilogoIfActive();
   } catch (e) {
@@ -2426,6 +3069,7 @@ async function deleteIscrizione(id) {
 let presView        = 'calendario';
 let presCalYear     = new Date().getFullYear();
 let presCalMonth    = new Date().getMonth();
+let presCalHideWeekend = (() => { try { return localStorage.getItem('presCalHideWeekend') === '1'; } catch (e) { return false; } })();
 let editPresIdx     = null;
 let presExtraAllievi= [];
 let presExtraProvaOk = new Set(); // nomi extra per cui è stata creata l'iscrizione Prova
@@ -2446,33 +3090,56 @@ async function renderPresenze() {
     const now = new Date();
     fMese.value = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
   }
+  // "Da/A": di default il mese corrente, come per il Calendario
+  const fDa = document.getElementById('presFiltroDa');
+  const fA  = document.getElementById('presFiltroA');
+  if (!fDa.value && !fA.value) {
+    const now = new Date();
+    fDa.value = dateToYmd(new Date(now.getFullYear(), now.getMonth(), 1));
+    fA.value  = dateToYmd(new Date(now.getFullYear(), now.getMonth()+1, 0));
+  }
 
   renderPresView();
+}
+
+// Mostra il filtro "Mese" solo nel Calendario (che naviga con le frecce),
+// "Da/A" nelle altre viste (elenco, tabella, per corso, per allievo).
+function updatePresFiltroVisibilita() {
+  const isCalendario = presView === 'calendario';
+  document.getElementById('presFiltroMeseGroup').style.display  = isCalendario ? '' : 'none';
+  document.getElementById('presFiltroRangeGroup').style.display = isCalendario ? 'none' : '';
+  document.getElementById('presFiltroRangeGroupA').style.display = isCalendario ? 'none' : '';
 }
 
 function renderPresView() {
   const view = presView;
   const el   = document.getElementById('presView');
   if (!el) return;
+  updatePresFiltroVisibilita();
   if (view === 'calendario') renderPresCalendario(el);
   else if (view === 'elenco') renderPresElenco(el);
+  else if (view === 'tabella') renderPresTabella(el);
   else if (view === 'corso')  renderPresCorsо(el);
   else if (view === 'allievo') renderPresAllievo(el);
 }
 
+// Nel Calendario il periodo lo decide la navigazione a mese (frecce), non il
+// filtro Da/A: renderPresCalendario applica comunque il suo anno/mese dopo
+// aver preso l'elenco filtrato solo per corso.
 function filteredPresenze() {
   const filtroCorso = (document.getElementById('presFiltroCorso')||{}).value || '';
-  const filtroMese  = (document.getElementById('presFiltroMese')||{}).value  || '';
-  return presenzeData.filter(r => {
-    if (filtroCorso && r.corso !== filtroCorso) return false;
-    if (filtroMese) {
-      const [fy, fm] = filtroMese.split('-');
-      const d = new Date(r.giorno);
-      if (isNaN(d)) return true;
-      if (d.getFullYear() !== parseInt(fy) || d.getMonth()+1 !== parseInt(fm)) return false;
-    }
-    return true;
-  });
+  let filtered = presenzeData.filter(r => !filtroCorso || r.corso === filtroCorso);
+
+  if (presView !== 'calendario') {
+    const da = (document.getElementById('presFiltroDa')||{}).value || '';
+    const a  = (document.getElementById('presFiltroA')||{}).value  || '';
+    filtered = filtered.filter(r => {
+      if (da && r.giorno < da) return false;
+      if (a  && r.giorno > a)  return false;
+      return true;
+    });
+  }
+  return filtered;
 }
 
 // ── VISTA CALENDARIO ──────────────────────────────────────
@@ -2485,11 +3152,10 @@ function renderPresCalendario(el) {
     presCalYear = y; presCalMonth = m;
   }
 
-  const firstDay = new Date(y, m, 1).getDay();
   const daysInMonth = new Date(y, m+1, 0).getDate();
-  const startOffset = (firstDay + 6) % 7;
   const monthLabel = new Date(y, m, 1).toLocaleDateString('it-IT', {month:'long', year:'numeric'});
   const today = new Date(); today.setHours(0,0,0,0);
+  const hideWeekend = presCalHideWeekend;
 
   const byDay = {};
   filteredPresenze().forEach(r => {
@@ -2502,19 +3168,35 @@ function renderPresCalendario(el) {
     }
   });
 
-  const giorni = ['Lun','Mar','Mer','Gio','Ven','Sab','Dom'];
+  const giorniFull = ['Lun','Mar','Mer','Gio','Ven','Sab','Dom'];
+  const giorni = hideWeekend ? giorniFull.slice(0,5) : giorniFull;
+
+  // rettangoli tutti della stessa dimensione: griglia a 7 (o 5, weekend nascosto)
+  // colonne fisse, celle vuote per l'offset iniziale del mese
   let cells = '';
-  for (let i=0; i<startOffset; i++) cells += `<div class="pres-cal-day pres-cal-empty"></div>`;
+  let offsetDone = false;
   for (let d=1; d<=daysInMonth; d++) {
     const dt = new Date(y, m, d);
+    const dow = dt.getDay(); // 0=Dom..6=Sab
+    if (hideWeekend && (dow===0 || dow===6)) continue;
+    if (!offsetDone) {
+      const idx = hideWeekend ? dow-1 : (dow+6)%7;
+      for (let i=0; i<idx; i++) cells += `<div class="pres-cal-day pres-cal-empty"></div>`;
+      offsetDone = true;
+    }
     const isToday = dt.getTime() === today.getTime();
+    const isPast  = dt.getTime() < today.getTime();
     const records = (byDay[d] || []).sort((a,b) => (a.ora||'').localeCompare(b.ora||''));
-    const pills = records.map(r =>
-      `<div class="pres-cal-pill" title="${r.ora ? escHtml(r.ora)+' ' : ''}${escHtml(r.corso)}: ${escHtml(r.allievi.join(', '))}"
-        onclick="event.stopPropagation();openEditPresenza('${r._id}')">${r.ora ? `${escHtml(r.ora)} ` : ''}${escHtml(r.corso)}</div>`
-    ).join('');
+    const pills = records.map(r => {
+      const cc = getCorsoColor(r.corso);
+      return `<div class="pres-cal-pill" style="background:${cc.bg};color:${cc.text};" title="${r.ora ? escHtml(r.ora)+' ' : ''}${escHtml(r.corso)}: ${escHtml(r.allievi.join(', '))}"
+        onclick="event.stopPropagation();openEditPresenza('${r._id}')">
+        <span class="pres-cal-pill-dot" style="background:${cc.border};"></span>
+        <span class="pres-cal-pill-text">${r.ora ? `${escHtml(r.ora)} ` : ''}${escHtml(r.corso)}</span>
+      </div>`;
+    }).join('');
     const dayStr = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-    cells += `<div class="pres-cal-day${isToday?' pres-cal-today':''}${records.length?' pres-cal-has-data':''}"
+    cells += `<div class="pres-cal-day${isToday?' pres-cal-today':''}${isPast?' pres-cal-past':''}${records.length?' pres-cal-has-data':''}"
       onclick="openPresDayChooser('${dayStr}')">
       <div class="pres-cal-day-num">${d}</div>
       <div class="pres-cal-dot">${pills}</div>
@@ -2526,8 +3208,9 @@ function renderPresCalendario(el) {
       <button class="pres-cal-btn" id="calPrev">&#8249;</button>
       <div class="pres-cal-nav-title">${monthLabel.charAt(0).toUpperCase()+monthLabel.slice(1)}</div>
       <button class="pres-cal-btn" id="calNext">&#8250;</button>
+      <button class="btn-secondary" id="calToggleWeekend" style="padding:6px 12px;font-size:11px;">${hideWeekend ? 'Mostra weekend' : 'Nascondi weekend'}</button>
     </div>
-    <div class="pres-cal-grid">
+    <div class="pres-cal-grid${hideWeekend ? ' pres-cal-grid-5' : ''}">
       ${giorni.map(g=>`<div class="pres-cal-head">${g}</div>`).join('')}
       ${cells}
     </div>`;
@@ -2544,35 +3227,165 @@ function renderPresCalendario(el) {
     fMese.value = `${presCalYear}-${String(presCalMonth+1).padStart(2,'0')}`;
     renderPresView();
   };
+  document.getElementById('calToggleWeekend').onclick = () => {
+    presCalHideWeekend = !presCalHideWeekend;
+    try { localStorage.setItem('presCalHideWeekend', presCalHideWeekend ? '1' : '0'); } catch (e) {}
+    renderPresView();
+  };
 }
 
 // ── VISTA ELENCO ──────────────────────────────────────────
 function renderPresElenco(el) {
-  const data = filteredPresenze().sort((a,b) => new Date(b.giorno)-new Date(a.giorno));
+  const data = filteredPresenze().sort((a,b) => b.giorno.localeCompare(a.giorno) || (a.ora||'').localeCompare(b.ora||''));
   if (!data.length) { el.innerHTML = '<div class="table-empty">Nessuna presenza nel periodo selezionato.</div>'; return; }
+
+  // raggruppate per giorno, ma data - ora - nome corso restano sempre sulla stessa riga
+  const byGiorno = {};
+  data.forEach(r => { (byGiorno[r.giorno] ||= []).push(r); });
+  const giorni = Object.keys(byGiorno).sort((a,b)=>b.localeCompare(a));
 
   el.innerHTML = `
     <div class="table-wrap">
-      ${data.map(r => `
-        <div class="pres-elenco-row">
-          <div class="pres-elenco-main">
-            <div class="pres-elenco-date">${fmtDate(r.giorno)}${r.ora ? ` · ${r.ora}` : ''}</div>
-            <div class="pres-elenco-corso">${escHtml(r.corso)}</div>
-            <div class="pres-elenco-count" style="font-size:11px;color:var(--text-dim);margin-left:auto;white-space:nowrap;">${r.allievi.length} pres.</div>
-            <div class="pres-elenco-actions" style="display:flex;gap:4px;">
-              <button class="btn-table" onclick="openEditPresenza('${r._id}')" title="Modifica">
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M8.5 1.5l2 2L4 10H2v-2L8.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-              </button>
-              <button class="btn-table btn-del" onclick="deletePresenza('${r._id}')" title="Elimina">
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M4 3v6M8 3v6M3 3l.5 7h5L9 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              </button>
-            </div>
-          </div>
-          <div class="pres-elenco-allievi">
-            ${r.allievi.map(a=>`<span class="pres-allievo-chip">${escHtml(a)}</span>`).join('')}
-          </div>
+      ${giorni.map(giorno => `
+        <div class="pres-elenco-day-group">
+          <div class="pres-elenco-day-header">${fmtDate(giorno)}</div>
+          ${byGiorno[giorno].map(r => {
+            return `
+            <div class="pres-elenco-row">
+              <div class="pres-elenco-main">
+                <div class="pres-elenco-date">${fmtDate(r.giorno)}${r.ora ? ` · ${r.ora}` : ''}</div>
+                <div class="pres-elenco-corso">${escHtml(r.corso)}</div>
+                <div class="pres-elenco-count" style="font-size:11px;color:var(--text-dim);margin-left:auto;white-space:nowrap;">${r.allievi.length} pres.</div>
+                <div class="pres-elenco-actions" style="display:flex;gap:4px;">
+                  <button class="btn-table" onclick="openEditPresenza('${r._id}')" title="Modifica">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M8.5 1.5l2 2L4 10H2v-2L8.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+                  </button>
+                  <button class="btn-table btn-del" onclick="deletePresenza('${r._id}')" title="Elimina">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M4 3v6M8 3v6M3 3l.5 7h5L9 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="pres-elenco-allievi">
+                ${r.allievi.map(a=>`<span class="pres-allievo-chip">${escHtml(a)}</span>`).join('')}
+              </div>
+            </div>`;
+          }).join('')}
         </div>`).join('')}
     </div>`;
+}
+
+// ── VISTA TABELLA (con selezione multipla per eliminare più lezioni insieme) ──
+function renderPresTabella(el) {
+  const data = filteredPresenze().sort((a,b) => b.giorno.localeCompare(a.giorno) || (a.ora||'').localeCompare(b.ora||''));
+  if (!data.length) { el.innerHTML = '<div class="table-empty">Nessuna presenza nel periodo selezionato.</div>'; return; }
+
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
+      <span class="count-label">${data.length} lezioni</span>
+      <div id="presTabellaBulkBar" style="display:none;align-items:center;gap:10px;">
+        <span id="presTabellaSelCount" style="font-size:12px;color:var(--text-muted);"></span>
+        <button class="btn-secondary btn-del" id="btnPresTabellaDeleteSel">Elimina selezionate</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table" id="presTabellaTable" data-mobile-cols="presTabellaTable">
+        <colgroup>
+          <col style="width:36px"><col style="width:15%"><col style="width:10%"><col style="width:26%">
+          <col style="width:10%"><col style="width:auto"><col style="width:70px">
+        </colgroup>
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="presTabSelectAll"></th>
+            <th>Data</th><th>Ora</th><th>Corso</th>
+            <th style="text-align:center">Presenti</th><th>Note</th>
+            <th style="width:70px"></th>
+          </tr>
+        </thead>
+        <tbody id="presTabellaBody">
+          ${data.map(r => {
+            const cc = getCorsoColor(r.corso);
+            return `<tr>
+              <td><input type="checkbox" class="pres-tab-check" data-id="${r._id}"></td>
+              <td style="white-space:nowrap;color:var(--text-muted);">${fmtDate(r.giorno)}</td>
+              <td>${r.ora ? escHtml(r.ora) : '<span style="color:var(--text-dim)">—</span>'}</td>
+              <td style="color:${cc.text};font-weight:500;">${escHtml(r.corso)}</td>
+              <td style="text-align:center;">${r.allievi.length}</td>
+              <td style="color:var(--text-dim);font-size:12px;">${r.note ? escHtml(r.note) : '—'}</td>
+              <td>
+                <div style="display:flex;gap:4px;">
+                  <button class="btn-table" onclick="openEditPresenza('${r._id}')" title="Modifica">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M8.5 1.5l2 2L4 10H2v-2L8.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+                  </button>
+                  <button class="btn-table btn-del" onclick="deletePresenza('${r._id}')" title="Elimina">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M4 3v6M8 3v6M3 3l.5 7h5L9 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                </div>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+
+  initPresTabellaBulkActions();
+}
+
+// Selezione multipla nella vista Tabella: spunta tutti/singoli e cancellazione
+// in blocco delle lezioni scelte (con le rispettive presenze registrate).
+function initPresTabellaBulkActions() {
+  const selectAll = document.getElementById('presTabSelectAll');
+  const bar = document.getElementById('presTabellaBulkBar');
+  const selCountEl = document.getElementById('presTabellaSelCount');
+  const getChecks = () => [...document.querySelectorAll('.pres-tab-check')];
+
+  const updateBar = () => {
+    const selected = getChecks().filter(c => c.checked);
+    if (selected.length > 0) {
+      bar.style.display = 'flex';
+      selCountEl.textContent = `${selected.length} selezionate`;
+    } else {
+      bar.style.display = 'none';
+    }
+    if (selectAll) {
+      const all = getChecks();
+      selectAll.checked = all.length > 0 && selected.length === all.length;
+      selectAll.indeterminate = selected.length > 0 && selected.length < all.length;
+    }
+  };
+
+  selectAll?.addEventListener('change', () => {
+    getChecks().forEach(c => { c.checked = selectAll.checked; });
+    updateBar();
+  });
+  getChecks().forEach(c => c.addEventListener('change', updateBar));
+
+  document.getElementById('btnPresTabellaDeleteSel')?.addEventListener('click', async () => {
+    const ids = getChecks().filter(c => c.checked).map(c => c.dataset.id);
+    if (!ids.length) return;
+    if (!await appConfirm(`Eliminare ${ids.length} lezioni selezionate?\nQuesta operazione non può essere annullata.`)) return;
+    try {
+      await Promise.all(ids.map(id => fsDelete(COLL_PRESENZE, id)));
+      presenzeData = presenzeData.filter(p => !ids.includes(p._id));
+      renderPresView();
+    } catch (e) {
+      appAlert('Errore durante l\'eliminazione di alcune lezioni.');
+    }
+  });
+}
+
+// Esporta in CSV le lezioni attualmente filtrate (stesso formato dell'import,
+// più allievi presenti e note, per un backup/condivisione più completo).
+function exportCalendarioPresenzeCsv() {
+  const data = filteredPresenze().sort((a,b) => a.giorno.localeCompare(b.giorno) || (a.ora||'').localeCompare(b.ora||''));
+  if (!data.length) return appAlert('Nessuna lezione da esportare nel periodo selezionato.');
+  const lines = [
+    'Giorno;Ora;Corso;Presenti;Allievi;Note',
+    ...data.map(r => [
+      fmtDate(r.giorno), r.ora || '', `"${r.corso.replace(/"/g,'""')}"`,
+      r.allievi.length, `"${r.allievi.join(', ').replace(/"/g,'""')}"`, `"${(r.note||'').replace(/"/g,'""')}"`,
+    ].join(';')),
+  ];
+  downloadCsv('calendario_presenze.csv', lines);
 }
 
 // ── VISTA PER CORSO ───────────────────────────────────────
@@ -2658,6 +3471,8 @@ function openPresForDay(giorno, corso) {
   renderPresChecklist([]);
   document.getElementById('presExtraList').innerHTML = '';
   document.getElementById('pExtraAllievo').value = '';
+  populateAllieviDatalist();
+  $('modalPresDelete').style.display = 'none';
   document.getElementById('modalPresOverlay').style.display = 'flex';
 }
 
@@ -2792,12 +3607,15 @@ function openPresDayChooser(dayStr) {
   if (!records.length) { openPresForDay(dayStr, null); return; }
   records.sort((a,b) => (a.ora||'').localeCompare(b.ora||''));
   $('presDayTitle').textContent = `Lezioni del ${fmtDate(dayStr)}`;
-  $('presDayList').innerHTML = records.map(r => `
-    <button class="btn-secondary" style="width:100%;justify-content:flex-start;gap:10px;"
+  $('presDayList').innerHTML = records.map(r => {
+    const cc = getCorsoColor(r.corso);
+    return `
+    <button class="btn-secondary" style="width:100%;justify-content:flex-start;gap:10px;border-left:3px solid ${cc.border};"
       onclick="closePresDayChooser();openEditPresenza('${r._id}')">
-      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.ora ? `${escHtml(r.ora)} · ` : ''}${escHtml(r.corso)}</span>
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${cc.text};">${r.ora ? `${escHtml(r.ora)} · ` : ''}${escHtml(r.corso)}</span>
       <span style="color:var(--text-dim);font-size:11px;flex-shrink:0;margin-left:auto;">${r.allievi.length} pres.</span>
-    </button>`).join('') + `
+    </button>`;
+  }).join('') + `
     <button class="btn-secondary" style="width:100%;justify-content:flex-start;margin-top:4px;color:var(--accent);"
       onclick="closePresDayChooser();openPresForDay('${dayStr}', null)">
       + Altro corso
@@ -2821,6 +3639,8 @@ function openEditPresenza(id) {
   renderPresChecklist(r.allievi);
   document.getElementById('presExtraList').innerHTML = '';
   document.getElementById('pExtraAllievo').value = '';
+  populateAllieviDatalist();
+  $('modalPresDelete').style.display = '';
   document.getElementById('modalPresOverlay').style.display = 'flex';
 }
 
@@ -2834,7 +3654,7 @@ function populatePCorso(selected) {
 }
 
 function getAllieviForCorso(nomeCorso) {
-  const iscr = [...new Set(iscrizioniData.filter(r => r.corso === nomeCorso).map(r => r.allievo))]
+  const iscr = [...new Set(iscrizioniData.filter(r => iscrizioneCopreCorso(r, nomeCorso)).map(r => r.allievo))]
     .sort((a,b)=>a.localeCompare(b,'it'));
   return iscr;
 }
@@ -2852,20 +3672,100 @@ function lezioniDaTipo(tipo) {
   return 0;
 }
 
+// L'abbonamento "mix" è valido su qualunque corso: le sue presenze si contano
+// su TUTTI i corsi dell'allievo, non solo quello dell'iscrizione. Le iscrizioni
+// storiche (senza `abbonamento`, pre-migrazione) restano legate al solo corso.
+// Nome dell'abbonamento di un'iscrizione: quello salvato, oppure (iscrizioni
+// storiche pre-abbonamenti) il nome del corso — la migrazione crea per ogni
+// vecchio corso un abbonamento "singolo" con lo stesso identico nome.
+function resolveAbbonamentoNome(isc) {
+  return isc.abbonamento || isc.corso;
+}
+
+function isAbbonamentoMix(nomeAbbonamento) {
+  if (!nomeAbbonamento) return false;
+  const ab = abbonamentiData.find(a => a.nome === nomeAbbonamento);
+  return !!ab && ab.contenuto === 'mix';
+}
+
+// Un'iscrizione "copre" un corso se è proprio quel corso, oppure se il suo
+// abbonamento è "mix" (valido su qualunque corso, quindi anche su questo).
+function iscrizioneCopreCorso(isc, nomeCorso) {
+  return isc.corso === nomeCorso || isAbbonamentoMix(resolveAbbonamentoNome(isc));
+}
+
+// Presenze consumate da una specifica iscrizione (pacchetto/prova), contate
+// dalla sua data di acquisto in poi. `presenzeList` è opzionale (default: tutte).
+// `finoAGiornoEsclusivo`, se indicato, esclude le presenze da quella data in
+// poi: serve a non far "sconfinare" nel conteggio di un vecchio pacchetto (es.
+// la prova) le presenze registrate DOPO che l'allievo ne ha acquistato uno
+// nuovo — altrimenti riaprendo la prova risulterebbe già "consumata" dalle
+// lezioni fatte con il pacchetto successivo.
+function presenzeConsumatePerIscrizione(isc, presenzeList, finoAGiornoEsclusivo) {
+  const mix = isAbbonamentoMix(resolveAbbonamentoNome(isc));
+  return (presenzeList || presenzeData).filter(p =>
+    p.allievi.includes(isc.allievo) && p.giorno >= isc.data
+    && (!finoAGiornoEsclusivo || p.giorno < finoAGiornoEsclusivo)
+    && (mix || p.corso === isc.corso)
+  ).length;
+}
+
 // Helper: lezioni rimanenti per allievo in un corso
-// Lezioni rimanenti del pacchetto/prova PIÙ RECENTE di questo allievo per questo corso.
-// Non si aggregano più iscrizioni diverse: ognuna ha la sua data di acquisto e le
-// presenze contano solo da quella data in poi (mai quelle di pacchetti precedenti,
-// altrimenti una prova o un pacchetto appena creato risulterebbe già "consumato").
-function lezioniRimanentePerAllievo(nomeAllievo, nomeCorso) {
-  const iscrizioni = iscrizioniData.filter(r => r.allievo === nomeAllievo && r.corso === nomeCorso);
-  if (!iscrizioni.length) return null;
-  const isc = iscrizioni.reduce((latest, r) => (!latest || r.data > latest.data) ? r : latest, null);
+// Lezioni rimanenti del pacchetto/prova PIÙ RECENTE (rispetto al giorno della
+// presenza che si sta guardando, non in assoluto) di questo allievo per questo
+// corso. Senza questo vincolo, riaprendo una VECCHIA presenza — es. il giorno
+// della prova — comparirebbe già il pacchetto acquistato DOPO quella data,
+// nascondendo la pill "Prova" su quella lezione. Non si aggregano più
+// iscrizioni diverse: ognuna ha la sua data di acquisto e le presenze contano
+// solo da quella data in poi FINO alla prossima iscrizione (se esiste): senza
+// questo limite superiore, le lezioni fatte col pacchetto successivo
+// risulterebbero consumate anche sul pacchetto/prova precedente.
+function lezioniRimanentePerAllievo(nomeAllievo, nomeCorso, giornoRiferimento) {
+  const candidati = iscrizioniData.filter(r => r.allievo === nomeAllievo && iscrizioneCopreCorso(r, nomeCorso));
+  const applicabili = candidati.filter(r => !giornoRiferimento || r.data <= giornoRiferimento);
+  if (!applicabili.length) return null;
+  const isc = applicabili.reduce((latest, r) => (!latest || r.data > latest.data) ? r : latest, null);
 
   const totLezioni = lezioniDaTipo(isc.tipo);
   if (totLezioni === 0) return null;
-  const presTot = presenzeData.filter(p => p.corso === nomeCorso && p.allievi.includes(nomeAllievo) && p.giorno >= isc.data).length;
+
+  const successive = candidati.filter(r => r.data > isc.data).map(r => r.data).sort();
+  const finoAGiorno = successive.length ? successive[0] : null;
+
+  const presTot = presenzeConsumatePerIscrizione(isc, null, finoAGiorno);
   return { totLezioni, presTot, rimanenti: Math.max(0, totLezioni - presTot), soloProva: isc.tipo === 'Prova' };
+}
+
+// Badge "rimaste"/"Prova" per una riga della checklist, calcolato in tempo reale:
+// se la persona è spuntata ORA (e non lo era già nel record salvato) la sua
+// presenza odierna viene contata subito come consumata, e viceversa se viene
+// tolta la spunta a una presenza che invece era già salvata.
+function presBadgeHtml(nome, nomeCorso, isCheckedNow) {
+  const giorno = document.getElementById('pGiorno')?.value || '';
+  const rimInfo = lezioniRimanentePerAllievo(nome, nomeCorso, giorno);
+  if (!rimInfo) return '';
+
+  const savedRecord = editPresIdx ? presenzeData.find(r => r._id === editPresIdx) : null;
+  const eraGiaSalvata = !!(savedRecord && savedRecord.corso === nomeCorso && savedRecord.allievi.includes(nome));
+
+  if (rimInfo.soloProva) {
+    // "già effettuata" conta solo le presenze salvate PRIMA di questa (o in un'altra
+    // lezione): la lezione di prova stessa, finché la stai creando/modificando,
+    // deve restare "Prova" — "già effettuata" comparirà dalla lezione successiva.
+    const presPrecedenti = eraGiaSalvata ? rimInfo.presTot - 1 : rimInfo.presTot;
+    return presPrecedenti >= rimInfo.totLezioni
+      ? '<span class="pres-check-badge" style="font-size:10px;padding:1px 6px;border-radius:99px;background:rgba(224,85,85,0.15);color:#e05555;margin-left:auto;flex-shrink:0;">Prova già effettuata</span>'
+      : '<span class="pres-check-badge" style="font-size:10px;padding:1px 6px;border-radius:99px;background:var(--accent-dim);color:var(--accent);margin-left:auto;flex-shrink:0;">Prova</span>';
+  }
+
+  let presTot = rimInfo.presTot;
+  if (isCheckedNow && !eraGiaSalvata) presTot += 1;
+  if (!isCheckedNow && eraGiaSalvata) presTot -= 1;
+  const rimanenti = Math.max(0, rimInfo.totLezioni - presTot);
+
+  if (rimanenti === 0)
+    return '<span class="pres-check-badge" style="font-size:10px;padding:1px 6px;border-radius:99px;background:rgba(224,85,85,0.15);color:#e05555;margin-left:auto;flex-shrink:0;">Lezioni terminate</span>';
+  return `<span class="pres-check-badge" style="font-size:10px;color:var(--text-dim);margin-left:auto;flex-shrink:0;">${rimanenti} rim.</span>`;
 }
 
 function renderPresChecklist(checked) {
@@ -2897,34 +3797,35 @@ function renderPresChecklist(checked) {
     </label>
     ${iscritti.map(nome => {
       const isCk = checkedSet.has(nome);
-      const rimInfo = lezioniRimanentePerAllievo(nome, nomeCorso);
-      let alertBadge = '';
-      if (rimInfo) {
-        if (rimInfo.soloProva) {
-          alertBadge = rimInfo.rimanenti === 0
-            ? '<span style="font-size:10px;padding:1px 6px;border-radius:99px;background:rgba(224,85,85,0.15);color:#e05555;margin-left:auto;flex-shrink:0;">Prova già effettuata</span>'
-            : '<span style="font-size:10px;padding:1px 6px;border-radius:99px;background:var(--accent-dim);color:var(--accent);margin-left:auto;flex-shrink:0;">Prova</span>';
-        } else if (rimInfo.rimanenti === 0)
-          alertBadge = '<span style="font-size:10px;padding:1px 6px;border-radius:99px;background:rgba(224,85,85,0.15);color:#e05555;margin-left:auto;flex-shrink:0;">ESAURITO</span>';
-        else if (rimInfo.rimanenti === 1)
-          alertBadge = '<span style="font-size:10px;padding:1px 6px;border-radius:99px;background:rgba(255,165,0,0.15);color:orange;margin-left:auto;flex-shrink:0;">ultima lezione</span>';
-        else
-          alertBadge = `<span style="font-size:10px;color:var(--text-dim);margin-left:auto;flex-shrink:0;">${rimInfo.rimanenti} rim.</span>`;
-      }
       return `<label class="pres-check-item${isCk?' checked':''}" data-nome="${escHtml(nome)}">
         <input type="checkbox" ${isCk?'checked':''} onchange="onPresCheck(this)">
         <span class="pres-check-name">${escHtml(nome)}</span>
-        ${alertBadge}
+        ${presBadgeHtml(nome, nomeCorso, isCk)}
       </label>`;
     }).join('')}`;
 
   updatePresConteggio();
 }
 
+// Ricalcola e sostituisce il badge di una riga in base allo stato attuale della sua checkbox
+function updatePresRowBadge(item) {
+  if (!item) return;
+  const nome = item.dataset.nome;
+  if (!nome || nome === '__all__') return;
+  const nomeCorso = document.getElementById('pCorso').value;
+  const isChecked = item.querySelector('input[type=checkbox]')?.checked || false;
+  const html = presBadgeHtml(nome, nomeCorso, isChecked);
+  const oldBadge = item.querySelector('.pres-check-badge');
+  if (oldBadge) oldBadge.outerHTML = html;
+  else if (html) item.querySelector('.pres-check-name').insertAdjacentHTML('afterend', html);
+}
+
 function toggleSelectAll(cb) {
   document.querySelectorAll('#presAllieviList .pres-check-item:not(#presCheckAll) input[type=checkbox]').forEach(c => {
     c.checked = cb.checked;
-    c.closest('.pres-check-item').classList.toggle('checked', cb.checked);
+    const item = c.closest('.pres-check-item');
+    item.classList.toggle('checked', cb.checked);
+    updatePresRowBadge(item);
   });
   updatePresConteggio();
 }
@@ -2935,6 +3836,7 @@ function onPresCheck(cb) {
   const all = [...document.querySelectorAll('#presAllieviList .pres-check-item:not(#presCheckAll) input[type=checkbox]')];
   const cbAll = document.getElementById('cbSelectAll');
   if (cbAll) cbAll.checked = all.every(c=>c.checked);
+  updatePresRowBadge(item);
   updatePresConteggio();
 }
 
@@ -2986,7 +3888,7 @@ async function creaIscrizioneProvaDaPresenza(allievo) {
   const docData = {
     allievo, as: currentAnnoScolastico(),
     data: document.getElementById('pGiorno').value || new Date().toISOString().slice(0,10),
-    tipo: 'Prova', corso, dataPag: '', pagato: 'No', costo: 0,
+    tipo: 'Prova', abbonamento: 'Prova', corso, dataPag: '', pagato: 'No', costo: 0,
     note: 'Creata da Registra presenza',
   };
   try {
@@ -3007,11 +3909,20 @@ function removePresExtra(nome) {
 }
 
 function renderExtraChips() {
-  document.getElementById('presExtraList').innerHTML = presExtraAllievi.map(nome =>
-    `<span class="pres-extra-chip">${escHtml(nome)}${presExtraProvaOk.has(nome) ? ' <strong style="color:var(--accent)">· Prova</strong>' : ''}
+  document.getElementById('presExtraList').innerHTML = presExtraAllievi.map(nome => {
+    // pill "Prova" solo se registrata in questa sessione; "Prova già effettuata"
+    // se l'allievo aveva già usufruito della prova gratuita in precedenza (su
+    // qualunque corso: la prova è unica per allievo, non per corso)
+    const giaEffettuata = iscrizioniData.some(r => r.allievo === nome && r.tipo === 'Prova');
+    const badge = presExtraProvaOk.has(nome)
+      ? ' <strong style="color:var(--accent)">· Prova</strong>'
+      : giaEffettuata
+        ? ' <strong style="color:#e05555">· Prova già effettuata</strong>'
+        : '';
+    return `<span class="pres-extra-chip">${escHtml(nome)}${badge}
       <button onclick="removePresExtra('${escHtml(nome)}')">&times;</button>
-    </span>`
-  ).join('');
+    </span>`;
+  }).join('');
 }
 
 function closePresModal() {
@@ -3109,6 +4020,14 @@ async function renderRiepilogoSection() {
   if (!iscrizioniData.length) await loadIscrizioni();
   populateRiepilogoDatalist();
 }
+// Pulsante "+" sulla card Iscrizioni del riepilogo allievo: apre la modale
+// nuova iscrizione con l'allievo già precompilato.
+function apriNuovaIscrizionePerAllievo(nomeCompleto) {
+  populateAllieviDatalist();
+  openNuovaIscrizione();
+  $('iAllievo').value = nomeCompleto;
+}
+
 async function apriRiepilogoAllievo(nomeCompleto) {
   if (!iscrizioniData.length) await loadIscrizioni();
   if (!presenzeData.length)   await loadPresenze();
@@ -3141,8 +4060,9 @@ function renderRiepilogoAllievo(nomeCompleto) {
     const lezioniTotali   = lezioniDaTipo(isc.tipo);
     // solo le presenze dalla data di acquisto DI QUESTO pacchetto in poi,
     // altrimenti presenze di pacchetti precedenti nello stesso corso lo farebbero
-    // risultare già parzialmente consumato appena creato
-    const presenzeAlCorso = presenze.filter(p => p.corso === isc.corso && p.giorno >= isc.data).length;
+    // risultare già parzialmente consumato appena creato (per gli abbonamenti
+    // "mix" si contano le presenze su qualunque corso)
+    const presenzeAlCorso = presenzeConsumatePerIscrizione(isc, presenze);
     const consumate       = Math.min(lezioniTotali, presenzeAlCorso);
     const rimanenti       = Math.max(0, lezioniTotali - presenzeAlCorso);
     return { ...isc, isScadenza: false, lezioniTotali, consumate, rimanenti };
@@ -3158,23 +4078,35 @@ function renderRiepilogoAllievo(nomeCompleto) {
   const anagrafica = allieviData.find(a => a.nomeCompleto === nomeCompleto);
   const tesserato  = anagrafica ? isTesserato(anagrafica.tesseramento) : null;
 
+  // pulsante "Modifica allievo" in alto: apre l'anagrafica di questo allievo
+  const btnModifica = document.getElementById('btnRiepilogoModifica');
+  if (btnModifica) {
+    btnModifica.style.display = anagrafica ? '' : 'none';
+    btnModifica.onclick = anagrafica ? () => openEditAllievo(anagrafica._id) : null;
+  }
+
   // Anni e corsi per filtri presenze
   const corsiPresenze = [...new Set(presenze.map(p => p.corso).filter(Boolean))].sort();
   const anniPresenze  = [...new Set(presenze.map(p => p.giorno?.slice(0,4)).filter(Boolean))].sort().reverse();
 
   el.innerHTML = `
     <div class="kpi-grid" style="margin-bottom:24px;">
-      <div class="kpi-card"><div class="kpi-label">Iscrizioni</div><div class="kpi-value">${iscrizioni.length}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Iscrizioni</div><div class="kpi-value">${iscrizioniPagabili.length}</div></div>
       <div class="kpi-card"><div class="kpi-label">Pagamenti OK</div><div class="kpi-value kpi-green">${totPagato}</div></div>
       <div class="kpi-card"><div class="kpi-label">Da pagare</div><div class="kpi-value${totDaPagare > 0 ? ' kpi-red' : ''}">${totDaPagare}</div></div>
       <div class="kpi-card"><div class="kpi-label">Totale</div><div class="kpi-value">${fmt(importoTot)}</div></div>
       <div class="kpi-card"><div class="kpi-label">Incassato</div><div class="kpi-value kpi-green">${fmt(importoPag)}</div></div>
       <div class="kpi-card"><div class="kpi-label">Presenze</div><div class="kpi-value">${presenze.length}</div></div>
-      <div class="kpi-card"><div class="kpi-label">Tesserato</div><div class="kpi-value ${tesserato === null ? '' : tesserato ? 'kpi-green' : 'kpi-red'}">${tesserato === null ? '—' : tesserato ? 'Sì' : 'No'}</div></div>
+      <div class="kpi-card"${anagrafica ? ` style="cursor:pointer;" onclick="openEditAllievo('${anagrafica._id}')" title="Clicca per modificare il tesseramento"` : ''}><div class="kpi-label">Tesserato</div><div class="kpi-value ${tesserato === null ? '' : tesserato ? 'kpi-green' : 'kpi-red'}">${tesserato === null ? '—' : tesserato ? 'Sì' : 'No'}</div></div>
     </div>
 
     <div class="card" style="margin-bottom:20px;">
-      <div class="card-title">Iscrizioni e lezioni rimanenti</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <div class="card-title" style="margin-bottom:0;">Iscrizioni e lezioni rimanenti</div>
+        <button class="btn-table" onclick="apriNuovaIscrizionePerAllievo('${escHtml(nomeCompleto).replace(/'/g,"&#39;")}')" title="Nuova iscrizione">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><line x1="6" y1="1.5" x2="6" y2="10.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="1.5" y1="6" x2="10.5" y2="6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
       ${!riepilogo.length ? '<div class="table-empty" style="margin-top:12px;">Nessuna iscrizione.</div>' : `
       <div class="table-wrap" style="margin-top:12px;max-height:320px;overflow-y:auto;">
         <table class="data-table" id="riepIscTable" data-mobile-cols="riepIscTable">
@@ -3197,7 +4129,7 @@ function renderRiepilogoAllievo(nomeCompleto) {
               return `<tr>
                 <td style="color:var(--text-muted)">${escHtml(r.as)}</td>
                 <td style="color:var(--text-muted)">${fmtDate(r.data)}</td>
-                <td style="font-weight:500">${escHtml(r.corso)}</td>
+                <td style="font-weight:500">${corsoDisplayHtml(r.corso)}</td>
                 <td><span style="background:var(--accent-dim);border:1px solid rgba(201,169,110,0.2);color:var(--accent);padding:2px 8px;border-radius:99px;font-size:11px;">${escHtml(r.tipo)}</span></td>
                 <td>${isProva ? '<span style="color:var(--text-dim)">—</span>' : `
                   <span class="badge ${pagatoOk ? 'badge-green' : 'badge-red'}">${pagatoOk ? 'Sì' : 'No'}</span>
@@ -3759,9 +4691,12 @@ function renderNotaMensile() {
   $('notaMensileContent').innerHTML = `
     <div class="card">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-bottom:16px">
-        <div>
-          <div style="font-size:13px;font-weight:600;letter-spacing:0.04em;color:var(--text)">Nota mensile</div>
-          <div style="font-size:12px;color:var(--text-muted);margin-top:3px">${MESI_NOMI[curMese]} ${curAnno}</div>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <img src="Logo_6.png" alt="Logo" class="nota-print-logo" style="width:42px;height:42px;object-fit:contain;display:none;">
+          <div>
+            <div style="font-size:13px;font-weight:600;letter-spacing:0.04em;color:var(--text)">Nota mensile</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:3px">${MESI_NOMI[curMese]} ${curAnno}</div>
+          </div>
         </div>
         <div style="display:flex;align-items:flex-start;gap:24px;flex-wrap:wrap">
           <div style="text-align:right;min-width:160px">
@@ -3806,14 +4741,14 @@ function renderNotaMensile() {
                 <td style="text-align:right;color:var(--red)">${!c&&!e?fmtCell(r.costo):''}</td>
               </tr>`;
             }).join('')}
+            <tr class="pivot-total">
+              <td colspan="2" style="text-align:right;border-right:1px solid var(--border2)">TOT</td>
+              <td style="text-align:right;color:var(--green);border-right:1px solid var(--border)">${totCassaEnt?fmt(totCassaEnt):'—'}</td>
+              <td style="text-align:right;color:var(--red);border-right:1px solid var(--border2)">${totCassaUsc?fmt(totCassaUsc):'—'}</td>
+              <td style="text-align:right;color:var(--green);border-right:1px solid var(--border)">${totBancaEnt?fmt(totBancaEnt):'—'}</td>
+              <td style="text-align:right;color:var(--red)">${totBancaUsc?fmt(totBancaUsc):'—'}</td>
+            </tr>
           </tbody>
-          <tfoot><tr class="pivot-total">
-            <td colspan="2" style="text-align:right;border-right:1px solid var(--border2)">TOT</td>
-            <td style="text-align:right;color:var(--green);border-right:1px solid var(--border)">${totCassaEnt?fmt(totCassaEnt):'—'}</td>
-            <td style="text-align:right;color:var(--red);border-right:1px solid var(--border2)">${totCassaUsc?fmt(totCassaUsc):'—'}</td>
-            <td style="text-align:right;color:var(--green);border-right:1px solid var(--border)">${totBancaEnt?fmt(totBancaEnt):'—'}</td>
-            <td style="text-align:right;color:var(--red)">${totBancaUsc?fmt(totBancaUsc):'—'}</td>
-          </tr></tfoot>
         </table>
       </div>
     </div>`;
@@ -3920,6 +4855,7 @@ async function init() {
   $('modalAllieviClose').addEventListener('click', closeAllieviModal);
   $('modalAllieviCancel').addEventListener('click', closeAllieviModal);
   $('modalAllieviSave').addEventListener('click', saveAllievo);
+  $('aTesseramento').addEventListener('change', () => updateTesseramentoScadGroup(true));
 
   document.querySelectorAll('#aTipoGrid .cat-chip').forEach(chip => {
     chip.addEventListener('click', () => {
@@ -3940,6 +4876,11 @@ async function init() {
   });
   $('btnDashAllievo').addEventListener('click', openNewAllievo);
 
+  // Sotto-schede Corsi / Abbonamenti
+  document.querySelectorAll('#corsiSubTabSwitch .pres-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => setCorsiSubTab(btn.dataset.subtab));
+  });
+
   // Modal corso
   document.querySelectorAll('#corsiRaggruppaSwitch .pres-view-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -3953,11 +4894,33 @@ async function init() {
   $('modalCorsoClose').addEventListener('click', closeCorsoModal);
   $('modalCorsoCancel').addEventListener('click', closeCorsoModal);
   $('modalCorsoSave').addEventListener('click', saveCorso);
-  document.querySelectorAll('#cTipoPrezzoGrid .cat-chip').forEach(chip => {
-    chip.addEventListener('click', () => setCorsoTipoPrezzo(chip.dataset.tipoprezzo));
+  // #cAbbonamentiGrid è popolata dinamicamente all'apertura della modale
+  // (populateCorsoAbbonamentiGrid), coi suoi listener già agganciati lì.
+
+  // Modal abbonamento
+  document.querySelectorAll('#abbonamentiRaggruppaSwitch .pres-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#abbonamentiRaggruppaSwitch .pres-view-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      $('abbonamentiRaggruppa').value = btn.dataset.raggruppa;
+      renderAbbonamentiTables();
+    });
   });
-  document.querySelectorAll('#cScadTipoGrid .cat-chip').forEach(chip => {
-    chip.addEventListener('click', () => setCorsoScadTipo(chip.dataset.scadtipo));
+  $('btnNuovoAbbonamento').addEventListener('click', async () => {
+    if (!corsiData.length) await loadCorsi();
+    openNewAbbonamento();
+  });
+  $('modalAbbonamentoClose').addEventListener('click', closeAbbonamentoModal);
+  $('modalAbbonamentoCancel').addEventListener('click', closeAbbonamentoModal);
+  $('modalAbbonamentoSave').addEventListener('click', saveAbbonamento);
+  document.querySelectorAll('#abContenutoGrid .cat-chip').forEach(chip => {
+    chip.addEventListener('click', () => setAbbonamentoContenuto(chip.dataset.contenuto));
+  });
+  document.querySelectorAll('#abTipoErogazioneGrid .cat-chip').forEach(chip => {
+    chip.addEventListener('click', () => setAbbonamentoTipoErogazione(chip.dataset.erogazione));
+  });
+  document.querySelectorAll('#abScadTipoGrid .cat-chip').forEach(chip => {
+    chip.addEventListener('click', () => setAbbonamentoScadTipo(chip.dataset.scadtipo));
   });
 
   // Modal personale
@@ -3980,16 +4943,42 @@ async function init() {
   $('modalPresClose').addEventListener('click', closePresModal);
   $('modalPresCancel').addEventListener('click', closePresModal);
   $('modalPresSave').addEventListener('click', savePresenza);
+  $('modalPresDelete').addEventListener('click', async () => {
+    const id = editPresIdx;
+    if (!id) return;
+    closePresModal();
+    await deletePresenza(id);
+  });
   $('btnPresAddExtra').addEventListener('click', addPresExtra);
   $('pExtraProvaChip').addEventListener('click', () => $('pExtraProvaChip').classList.toggle('active'));
   $('pExtraAllievo').addEventListener('keydown', e => { if (e.key==='Enter') { e.preventDefault(); addPresExtra(); } });
 
-  document.querySelectorAll('.pres-view-btn').forEach(btn => {
+  document.querySelectorAll('#presViewSwitch .pres-view-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.pres-view-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('#presViewSwitch .pres-view-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       presView = btn.dataset.view;
       renderPresView();
+    });
+  });
+
+  // Raggruppamento allievi (nessuno / tipo / tesseramento)
+  document.querySelectorAll('#allieviRaggruppaSwitch .pres-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#allieviRaggruppaSwitch .pres-view-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      $('allieviRaggruppa').value = btn.dataset.raggruppa;
+      applyAllieviFilters();
+    });
+  });
+
+  // Raggruppamento iscrizioni (nessuno / tipo / tesseramento)
+  document.querySelectorAll('#iscrizioniRaggruppaSwitch .pres-view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#iscrizioniRaggruppaSwitch .pres-view-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      $('iscrizioniRaggruppa').value = btn.dataset.raggruppa;
+      applyIscrizioniFilters();
     });
   });
 
@@ -3998,6 +4987,12 @@ async function init() {
     const [y,m] = ($('presFiltroMese').value||'').split('-');
     if (y && m) { presCalYear = parseInt(y); presCalMonth = parseInt(m)-1; }
     renderPresView();
+  });
+  $('presFiltroDa').addEventListener('change', renderPresView);
+  $('presFiltroA').addEventListener('change', renderPresView);
+  $('btnEsportaCalendario').addEventListener('click', async () => {
+    if (!presenzeData.length) await loadPresenze();
+    exportCalendarioPresenzeCsv();
   });
 
   // Tabelle filtri
@@ -4038,6 +5033,7 @@ async function init() {
   $('modalIscClose').addEventListener('click', closeIscModal);
   $('modalIscCancel').addEventListener('click', closeIscModal);
   $('modalIscSave').addEventListener('click', saveIscrizione);
+  $('iTesseraAllievo').addEventListener('change', () => updateIscTesseramentoGroup(true));
 
   document.querySelectorAll('#iTipoGrid .cat-chip').forEach(chip => {
     chip.addEventListener('click', () => {
@@ -4052,8 +5048,8 @@ async function init() {
     chip.addEventListener('click', () => setPagatoChip(chip.dataset.pagato));
   });
 
-  $('iCorso').addEventListener('change', updateIscrizioneCorsoMode);
-  $('iData').addEventListener('change', updateIscrizioneCorsoMode);
+  $('iAbbonamento').addEventListener('change', () => updateIscrizioneAbbonamentoMode());
+  $('iData').addEventListener('change', () => updateIscrizioneAbbonamentoMode());
   $('compensiAnno').addEventListener('change', renderCompensi);
   $('notaAnno').addEventListener('change', renderNotaMensile);
   $('notaMese').addEventListener('change', renderNotaMensile);
@@ -4099,11 +5095,12 @@ Object.assign(window, {
   openEdit, deleteRow,
   openEditAllievo, deleteAllievo,
   openEditCorso, deleteCorso,
+  openEditAbbonamento, deleteAbbonamento,
   openEditPersonale, deletePersonale,
   openEditIscrizione, deleteIscrizione,
   openEditPresenza, deletePresenza, openPresForDay,
   openPresDayChooser, closePresDayChooser,
-  apriRiepilogoAllievo,
+  apriRiepilogoAllievo, apriNuovaIscrizionePerAllievo,
   toggleSelectAll, onPresCheck, removePresExtra,
 });
 
