@@ -56,7 +56,8 @@ const parseDate = (v) => {
   if (!v) return null;
   if (v instanceof Date) return v;
   if (typeof v === 'number') { const d = new Date((v - 25569) * 86400000); return d; }
-  return new Date(v);
+  // 'YYYY-MM-DD' → mezzanotte locale (new Date(stringa) la leggerebbe in UTC)
+  return ymdToDate(v) || new Date(v);
 };
 // 'YYYY-MM-DD' → Date locale a mezzanotte (niente shift di fuso orario)
 const ymdToDate = (s) => {
@@ -70,11 +71,29 @@ const defaultTesseramentoScad = () => {
   return dateToYmd(d);
 };
 
+// Numero da valore libero: accetta "12,50", "1.234,56", "1,234.56", "€ 12" ecc.
+// Con entrambi i separatori, quello che compare per ultimo è il decimale;
+// un separatore ripetuto (es. "1.234.567") è delle migliaia. NaN/∞ → 0.
 const parseNum = (v) => {
-  if (typeof v === 'number') return v;
-  if (!v) return 0;
-  return parseFloat(String(v).replace(',','.')) || 0;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  if (v == null || v === '') return 0;
+  let s = String(v).replace(/[€\s]/g, '');
+  const commas = (s.match(/,/g) || []).length, dots = (s.match(/\./g) || []).length;
+  if (commas && dots) {
+    s = s.lastIndexOf(',') > s.lastIndexOf('.')
+      ? s.replace(/\./g, '').replace(',', '.')
+      : s.replace(/,/g, '');
+  } else if (commas) {
+    s = commas > 1 ? s.replace(/,/g, '') : s.replace(',', '.');
+  } else if (dots > 1) {
+    s = s.replace(/\./g, '');
+  }
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : 0;
 };
+
+// importo per CSV in formato italiano (virgola decimale, separatore di campo ";")
+const csvNum = (v) => v.toFixed(2).replace('.', ',');
 
 const $ = (id) => document.getElementById(id);
 
@@ -520,7 +539,7 @@ function renderDashDaSaldare() {
       ${daSaldare.map(r => `
         <div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px;">
           <span style="cursor:pointer;color:var(--accent);text-decoration:underline;text-underline-offset:3px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
-            onclick="apriRiepilogoAllievo('${escHtml(r.allievo).replace(/'/g,"&#39;")}')">${escHtml(r.allievo)}</span>
+            onclick="apriRiepilogoAllievo(${jsArg(r.allievo)})">${escHtml(r.allievo)}</span>
           <span style="color:var(--text-muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${corsiDisplayHtml(r.corsi, r.abbonamento)} (${escHtml(r.tipo)})</span>
           <span style="color:var(--red);font-variant-numeric:tabular-nums;white-space:nowrap;">${r.costo ? fmt(r.costo) : '—'}</span>
         </div>`).join('')}
@@ -551,7 +570,7 @@ function renderDashProssime() {
         const isOggi = p.giorno === oggiYMD;
         const domani = new Date(oggi); domani.setDate(domani.getDate() + 1);
         const domaniYMD = `${domani.getFullYear()}-${String(domani.getMonth()+1).padStart(2,'0')}-${String(domani.getDate()).padStart(2,'0')}`;
-        const label = isOggi ? 'Oggi' : p.giorno === domaniYMD ? 'Domani' : GIORNI[new Date(p.giorno).getDay()];
+        const label = isOggi ? 'Oggi' : p.giorno === domaniYMD ? 'Domani' : GIORNI[ymdToDate(p.giorno)?.getDay()];
         return `
         <div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px;">
           <span class="badge ${isOggi ? 'badge-green' : 'badge-gold'}" style="white-space:nowrap;width:78px;justify-content:center;flex-shrink:0;">${label}</span>
@@ -589,10 +608,10 @@ function pacchettiInScadenza(entroGiorni = 15, sogliaLezioni = 1) {
       const key = `${isc.allievo}|||${corso}`;
       if (SCAD_TIPI_SET.has(isc.tipo)) {
         const cur = latestScadenza.get(key);
-        if (!cur || isc.data > cur.isc.data) latestScadenza.set(key, { isc, corso });
+        if (!cur || iscPiuRecente(isc, cur.isc)) latestScadenza.set(key, { isc, corso });
       } else if (isc.tipo !== 'Prova') {
         const cur = latestPacchetto.get(key);
-        if (!cur || isc.data > cur.isc.data) latestPacchetto.set(key, { isc, corso });
+        if (!cur || iscPiuRecente(isc, cur.isc)) latestPacchetto.set(key, { isc, corso });
       }
     });
   });
@@ -676,7 +695,7 @@ function renderDashScadenze() {
         <div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px;">
           <span class="badge ${badge}" style="white-space:nowrap;width:64px;justify-content:center;flex-shrink:0;">${label}</span>
           <span style="cursor:pointer;color:var(--accent);text-decoration:underline;text-underline-offset:3px;flex-shrink:0;max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
-            onclick="apriRiepilogoAllievo('${escHtml(p.allievo).replace(/'/g,"&#39;")}')">${escHtml(p.allievo)}</span>
+            onclick="apriRiepilogoAllievo(${jsArg(p.allievo)})">${escHtml(p.allievo)}</span>
           <span style="color:var(--text-muted);font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.corso ? escHtml(p.corso) : '—'} (${p.tipo})</span>
           ${p.soloScadenza ? '' : `<span style="color:var(--text-dim);font-size:11px;white-space:nowrap;">${p.rimanenti}/${p.lezioniTotali} lez.</span>`}
           ${p.scadenza ? `<span style="color:var(--text-dim);font-size:11px;white-space:nowrap;">${fmtDate(dateToYmd(p.scadenza))}</span>` : ''}
@@ -713,7 +732,7 @@ function renderChartDash() {
 const PAG_OPTIONS = ['Contanti','Bonifico','Carta','PayPal','Satispay','Altro'];
 
 function initInserimento() {
-  $('fData').valueAsDate = new Date();
+  $('fData').value = dateToYmd(new Date());
 
   $('typeToggle').querySelectorAll('.type-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -807,7 +826,7 @@ function renderPagGrid() {
 }
 
 function resetForm() {
-  $('fData').valueAsDate = new Date();
+  $('fData').value = dateToYmd(new Date());
   $('fCosto').value = '';
   $('fDescrizione').value = '';
   currentCat = '';
@@ -842,7 +861,7 @@ async function submitSpesa() {
     const docData = { data, costo, descrizione, categoria: currentCat, tipo: currentType, pagamento: currentPag };
     if (personale) docData.personale = personale;
     const id = await fsAdd(COLL_SPESE, docData);
-    speseData.push({ _id: id, ...docData, data: new Date(data) });
+    speseData.push({ _id: id, ...docData, data: ymdToDate(data) });
 
     // aggiorna il tesseramento dell'allievo selezionato
     let extra = '';
@@ -900,7 +919,7 @@ function initCsvImport() {
 }
 
 function downloadCsvTemplate() {
-  const oggi = fmtDate(new Date().toISOString().slice(0,10));
+  const oggi = fmtDate(dateToYmd(new Date()));
   const lines = [
     'Data;Importo;Descrizione;Categoria;Tipo;Pagamento',
     `${oggi};25,50;Esempio uscita;Affitto;Uscite;Contanti`,
@@ -958,8 +977,9 @@ function csvParseData(v) {
   }
   m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m) {
-    const dt = new Date(v);
-    return isNaN(dt) ? null : v;
+    // ricostruita in locale: scarta date inesistenti (es. 2024-02-31)
+    const dt = ymdToDate(v);
+    return dt && dateToYmd(dt) === v ? v : null;
   }
   return null;
 }
@@ -1048,7 +1068,7 @@ async function importCsvRows() {
   try {
     const ids = await fsAddMany(COLL_SPESE, csvValidDocs);
     csvValidDocs.forEach((d, i) => {
-      speseData.push({ _id: ids[i], ...d, data: new Date(d.data) });
+      speseData.push({ _id: ids[i], ...d, data: ymdToDate(d.data) });
     });
     $('csvPreview').innerHTML = `<div class="form-feedback">✓ Importate ${csvValidDocs.length} righe.</div>`;
     csvValidDocs = [];
@@ -1155,15 +1175,15 @@ function exportCsv() {
 
   const header = ['Data','Importo','Descrizione','Categoria','Tipo','Pagamento'];
   const rows = filtered.map(r => [
-    r.data ? r.data.toISOString().split('T')[0] : '',
-    r.costo,
+    r.data ? dateToYmd(r.data) : '',
+    csvNum(r.costo),
     `"${(r.descrizione||'').replace(/"/g,'""')}"`,
     `"${(r.categoria||'').replace(/"/g,'""')}"`,
     r.tipo,
     r.pagamento
   ]);
 
-  const csv = [header, ...rows].map(r => r.join(',')).join('\n');
+  const csv = [header, ...rows].map(r => r.join(';')).join('\n');
   const blob = new Blob(['\uFEFF'+csv], { type: 'text/csv;charset=utf-8;' });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
@@ -1194,7 +1214,7 @@ function openEdit(id) {
   const r = speseData.find(r => r._id === id);
   if (!r) return;
   editRowIndex = id;
-  $('mData').value        = r.data ? r.data.toISOString().split('T')[0] : '';
+  $('mData').value        = r.data ? dateToYmd(r.data) : '';
   $('mCosto').value       = r.costo;
   $('mDescrizione').value = r.descrizione;
   $('mCategoria').value   = r.categoria;
@@ -1223,10 +1243,14 @@ async function saveEdit() {
   const categoria = $('mCategoria').value;
   const personale = categoria === 'Contributo team' ? $('mPersonale').value : '';
   if (categoria === 'Contributo team' && !personale) return appAlert('Seleziona il personale.');
+  const data  = $('mData').value;
+  const costo = parseFloat($('mCosto').value);
+  if (!data) return appAlert('Inserisci la data.');
+  if (!Number.isFinite(costo) || costo <= 0) return appAlert('Inserisci un importo valido.');
 
   const upd = {
-    data:        $('mData').value,
-    costo:       parseFloat($('mCosto').value),
+    data,
+    costo,
     descrizione: $('mDescrizione').value,
     categoria,
     tipo:        $('mTipo').value,
@@ -1236,7 +1260,7 @@ async function saveEdit() {
   try {
     await fsUpdate(COLL_SPESE, editRowIndex, upd);
     const r = speseData.find(r => r._id === editRowIndex);
-    if (r) Object.assign(r, upd, { data: new Date(upd.data) });
+    if (r) Object.assign(r, upd, { data: ymdToDate(upd.data) });
     closeModal(); applyFilters();
   } catch (e) {
     appAlert('Errore durante il salvataggio.');
@@ -1729,28 +1753,28 @@ function exportTabelleCsv() {
 
   const lines = [];
   if (modalita === 'anno') {
-    lines.push(['Mese','Entrate','Uscite','Guadagno'].join(','));
+    lines.push(['Mese','Entrate','Uscite','Guadagno'].join(';'));
     buildPivotAnno(anni[0]).forEach(r => {
-      lines.push([r.label, r.entrate.toFixed(2), r.uscite.toFixed(2), r.guadagno.toFixed(2)].join(','));
+      lines.push([r.label, csvNum(r.entrate), csvNum(r.uscite), csvNum(r.guadagno)].join(';'));
     });
   } else {
     const header = ['Mese', ...anni.flatMap(a => [`Entrate ${a}`, `Uscite ${a}`, `Guadagno ${a}`])];
-    lines.push(header.join(','));
+    lines.push(header.join(';'));
     MESI_NOMI.forEach((label, m) => {
       const cols = anni.flatMap(a => {
         const righe = speseData.filter(r => r.data?.getFullYear()===a && r.data?.getMonth()===m);
         const ent = righe.filter(r=>r.tipo==='Entrate').reduce((s,r)=>s+r.costo,0);
         const usc = righe.filter(r=>r.tipo==='Uscite').reduce((s,r)=>s+r.costo,0);
-        return [ent.toFixed(2), usc.toFixed(2), (ent-usc).toFixed(2)];
+        return [csvNum(ent), csvNum(usc), csvNum(ent-usc)];
       });
-      lines.push([label, ...cols].join(','));
+      lines.push([label, ...cols].join(';'));
     });
     const totals = anni.flatMap(a => {
       const ent = speseData.filter(r=>r.tipo==='Entrate'&&r.data?.getFullYear()===a).reduce((s,r)=>s+r.costo,0);
       const usc = speseData.filter(r=>r.tipo==='Uscite' &&r.data?.getFullYear()===a).reduce((s,r)=>s+r.costo,0);
-      return [ent.toFixed(2), usc.toFixed(2), (ent-usc).toFixed(2)];
+      return [csvNum(ent), csvNum(usc), csvNum(ent-usc)];
     });
-    lines.push(['Totale', ...totals].join(','));
+    lines.push(['Totale', ...totals].join(';'));
   }
 
   const csv  = lines.join('\n');
@@ -1838,9 +1862,8 @@ function allievoRowHtml(r) {
   const c = getTipoColor(r.tipo);
   const badgeStyle = `background:${c.bg};border:1px solid ${c.border};color:${c.text};display:inline-flex;align-items:center;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:500;`;
   // nome cliccabile → riepilogo allievo
-  const nomeSafe = escHtml(r.nomeCompleto).replace(/'/g,'&#39;');
   return `<tr>
-      <td style="font-weight:500;cursor:pointer;" onclick="apriRiepilogoAllievo('${nomeSafe}')" title="Apri riepilogo">
+      <td style="font-weight:500;cursor:pointer;" onclick="apriRiepilogoAllievo(${jsArg(r.nomeCompleto)})" title="Apri riepilogo">
         <span style="color:var(--accent);text-decoration:underline;text-underline-offset:3px;">${escHtml(r.nomeCompleto)}</span>
       </td>
       <td><span style="${badgeStyle}">${escHtml(r.tipo)}</span></td>
@@ -2698,7 +2721,7 @@ function iscrizioneRowHtml(r) {
     : `<span class="badge ${pag?'badge-green':'badge-red'}">${pag?'Sì':'No'}</span>`;
   const costoCell = isProva ? '<span style="color:var(--text-dim)">—</span>' : (r.costo?fmt(r.costo):'—');
   return `<tr>
-      <td style="font-weight:500;cursor:pointer;" onclick="apriRiepilogoAllievo('${escHtml(r.allievo).replace(/'/g,"&#39;")}')" title="Apri riepilogo">
+      <td style="font-weight:500;cursor:pointer;" onclick="apriRiepilogoAllievo(${jsArg(r.allievo)})" title="Apri riepilogo">
         <span style="color:var(--accent);text-decoration:underline;text-underline-offset:3px;">${escHtml(r.allievo)}</span>
       </td>
       <td><span class="badge badge-gold">${escHtml(r.as)}</span></td>
@@ -2889,6 +2912,14 @@ function toggleIscCorsiPanel(forceClose) {
 }
 
 let scadenzaIscPreset = ''; // scadenza salvata da mostrare all'apertura in modifica
+// ultima scadenza proposta in automatico e per quale abbonamento: se il campo la
+// contiene ancora l'operatore non l'ha toccata, quindi cambiando la data si ricalcola;
+// una data scritta a mano invece resta (finché non si cambia abbonamento)
+let scadenzaIscAuto = { ab: null, val: '' };
+function resetScadenzaIsc() {
+  $('iScadenza').value = '';
+  scadenzaIscAuto = { ab: null, val: '' };
+}
 
 // Adatta la modale iscrizione all'abbonamento selezionato: chip pacchetti oppure
 // riquadro informativo con la scadenza (nessuna scelta, la decide l'abbonamento).
@@ -2917,8 +2948,13 @@ function updateIscrizioneAbbonamentoMode() {
       ? `${ab.scadenzaTipo}${scad ? ' — scade il ' + fmtDate(scad) : ''}`
       : 'Nessuna durata configurata su questo abbonamento';
     // data di scadenza modificabile: in apertura modifica si mantiene quella salvata,
-    // altrimenti si propone quella calcolata dall'abbonamento
-    $('iScadenza').value = scadenzaIscPreset || scad || '';
+    // altrimenti si propone quella calcolata dall'abbonamento (senza sovrascrivere
+    // una data inserita a mano per lo stesso abbonamento)
+    const cur = $('iScadenza').value;
+    const manuale = cur && cur !== scadenzaIscAuto.val && scadenzaIscAuto.ab === ab.nome;
+    if (scadenzaIscPreset) $('iScadenza').value = scadenzaIscPreset;
+    else if (!manuale) $('iScadenza').value = scad || '';
+    scadenzaIscAuto = { ab: ab.nome, val: scad || '' };
     scadenzaIscPreset = '';
     $('iPagatoRow').style.display = '';
     $('iCostoGroup').style.display = '';
@@ -2943,7 +2979,7 @@ function openNuovaIscrizione() {
   $('modalIscTitle').textContent = 'Nuova iscrizione';
   $('iAllievo').value = '';
   $('iAS').value = currentAnnoScolastico();
-  $('iData').valueAsDate = new Date();
+  $('iData').value = dateToYmd(new Date());
   setPagatoChip('No');
   $('iNote').value = '';
   $('iCosto').value = '';
@@ -2951,6 +2987,7 @@ function openNuovaIscrizione() {
   populateAbbonamentiSelect('');
   populateCorsiChipGridIscrizione([]);
   toggleIscCorsiPanel(true);
+  resetScadenzaIsc();
   updateIscrizioneAbbonamentoMode();
   $('iTesseraAllievo').checked = false;
   $('iTesseramentoScad').value = '';
@@ -2966,9 +3003,9 @@ function openEditIscrizione(id) {
   $('modalIscTitle').textContent = 'Modifica iscrizione';
   $('iAllievo').value  = r.allievo;
   $('iAS').value       = r.as;
-  $('iData').value     = r.data ? (r.data instanceof Date ? r.data.toISOString().split('T')[0] : String(r.data)) : '';
+  $('iData').value     = r.data ? (r.data instanceof Date ? dateToYmd(r.data) : String(r.data)) : '';
   setPagatoChip(isPagato(r.pagato) ? 'Sì' : 'No');
-  $('iDataPag').value  = isPagato(r.pagato) && r.dataPag ? (r.dataPag instanceof Date ? r.dataPag.toISOString().split('T')[0] : String(r.dataPag)) : '';
+  $('iDataPag').value  = isPagato(r.pagato) && r.dataPag ? (r.dataPag instanceof Date ? dateToYmd(r.dataPag) : String(r.dataPag)) : '';
   $('iNote').value     = r.note;
   $('iCosto').value    = r.costo || '';
   setTipoIscChip(r.tipo);
@@ -2977,6 +3014,7 @@ function openEditIscrizione(id) {
   populateAbbonamentiSelect(r.abbonamento || '');
   populateCorsiChipGridIscrizione(r.corsi || []);
   toggleIscCorsiPanel(true);
+  resetScadenzaIsc();
   scadenzaIscPreset = r.scadenza || '';
   updateIscrizioneAbbonamentoMode();
   scadenzaIscPreset = '';
@@ -3122,7 +3160,7 @@ async function saveIscrizione() {
 async function deleteIscrizione(id) {
   const r = iscrizioniData.find(r => r._id === id);
   if (!r) return;
-  if (!await appConfirm(`Eliminare l'iscrizione di "${r.allievo}" — ${corsiDisplayText(r.corsi, 'nessun corso')} (${r.tipo})?\nL'operazione non può essere annullata.`)) return;
+  if (!await appConfirm(`Eliminare l'iscrizione di "${r.allievo}" — ${corsiDisplayText(r.corsi, 'nessun corso', r.abbonamento)} (${r.tipo})?\nL'operazione non può essere annullata.`)) return;
   try {
     await fsDelete(COLL_ISCRIZIONI, id);
     iscrizioniData = iscrizioniData.filter(r => r._id !== id);
@@ -3227,8 +3265,8 @@ function renderPresCalendario(el) {
 
   const byDay = {};
   filteredPresenze().forEach(r => {
-    const d = new Date(r.giorno);
-    if (isNaN(d)) return;
+    const d = ymdToDate(r.giorno);
+    if (!d) return;
     if (d.getFullYear()===y && d.getMonth()===m) {
       const k = d.getDate();
       if (!byDay[k]) byDay[k] = [];
@@ -3533,7 +3571,7 @@ function openPresForDay(giorno, corso) {
   editPresIdx     = null;
   presExtraAllievi= []; presExtraProvaOk = new Set(); $('pExtraProvaChip')?.classList.remove('active');
   document.getElementById('modalPresTitle').textContent = 'Registra presenza';
-  document.getElementById('pGiorno').value = giorno || new Date().toISOString().split('T')[0];
+  document.getElementById('pGiorno').value = giorno || dateToYmd(new Date());
   document.getElementById('pNote').value   = '';
   populatePCorso(corso);
   renderPresChecklist([]);
@@ -3545,7 +3583,7 @@ function openPresForDay(giorno, corso) {
 }
 
 function openNuovaPresenza() {
-  openPresForDay(new Date().toISOString().split('T')[0], null);
+  openPresForDay(dateToYmd(new Date()), null);
 }
 
 // ── IMPORT CALENDARIO LEZIONI (CSV giorno; ora; corso) ────
@@ -3577,7 +3615,7 @@ function initCalImport() {
 
   $('btnCalTemplate').addEventListener('click', () => {
     const corsoEsempio = corsiData[0]?.nome || 'Pilates';
-    const oggi = fmtDate(new Date().toISOString().slice(0,10));
+    const oggi = fmtDate(dateToYmd(new Date()));
     downloadCsv('modello_calendario.csv', [
       'Giorno;Ora;Corso',
       `${oggi};18:00;${corsoEsempio}`,
@@ -3741,6 +3779,12 @@ function getAllieviCompatibiliNonIscritti(nomeCorso) {
     .sort((a,b)=>a.localeCompare(b,'it'));
 }
 
+// true se l'iscrizione `a` è più recente di `b`: per data e, a parità di giorno,
+// per id (criterio arbitrario ma stabile: dashboard e presenze scelgono sempre la stessa)
+function iscPiuRecente(a, b) {
+  return a.data !== b.data ? a.data > b.data : a._id > b._id;
+}
+
 // Helper: lezioni totali da tipo iscrizione
 function lezioniDaTipo(tipo) {
   if (tipo === 'x1')    return 1;
@@ -3799,7 +3843,7 @@ function lezioniRimanentePerAllievo(nomeAllievo, nomeCorso, giornoRiferimento) {
   const candidati = iscrizioniData.filter(r => r.allievo === nomeAllievo && iscrizioneCopreCorso(r, nomeCorso));
   const applicabili = candidati.filter(r => !giornoRiferimento || r.data <= giornoRiferimento);
   if (!applicabili.length) return null;
-  const isc = applicabili.reduce((latest, r) => (!latest || r.data > latest.data) ? r : latest, null);
+  const isc = applicabili.reduce((latest, r) => (!latest || iscPiuRecente(r, latest)) ? r : latest, null);
 
   const totLezioni = lezioniDaTipo(isc.tipo);
   if (totLezioni === 0) return null;
@@ -4008,7 +4052,7 @@ async function creaIscrizioneProvaDaPresenza(allievo) {
 
   const docData = {
     allievo, as: currentAnnoScolastico(),
-    data: document.getElementById('pGiorno').value || new Date().toISOString().slice(0,10),
+    data: document.getElementById('pGiorno').value || dateToYmd(new Date()),
     tipo: 'Prova', abbonamento: 'Prova', corso, dataPag: '', pagato: 'No', costo: 0,
     note: 'Creata da Registra presenza',
   };
@@ -4041,7 +4085,7 @@ function renderExtraChips() {
         ? ' <strong style="color:#e05555">· Prova già effettuata</strong>'
         : '';
     return `<span class="pres-extra-chip">${escHtml(nome)}${badge}
-      <button onclick="removePresExtra('${escHtml(nome)}')">&times;</button>
+      <button onclick="removePresExtra(${jsArg(nome)})">&times;</button>
     </span>`;
   }).join('');
 }
@@ -4224,7 +4268,7 @@ function renderRiepilogoAllievo(nomeCompleto) {
     <div class="card" style="margin-bottom:20px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
         <div class="card-title" style="margin-bottom:0;">Iscrizioni e lezioni rimanenti</div>
-        <button class="btn-table" onclick="apriNuovaIscrizionePerAllievo('${escHtml(nomeCompleto).replace(/'/g,"&#39;")}')" title="Nuova iscrizione">
+        <button class="btn-table" onclick="apriNuovaIscrizionePerAllievo(${jsArg(nomeCompleto)})" title="Nuova iscrizione">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><line x1="6" y1="1.5" x2="6" y2="10.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="1.5" y1="6" x2="10.5" y2="6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
         </button>
       </div>
@@ -4349,7 +4393,7 @@ function renderRiepilogoAllievo(nomeCompleto) {
     const rows = getFilteredPres();
     openPrintTable(
       `Storico presenze — ${nomeCompleto}`,
-      `${rows.length} presenze · generato il ${fmtDate(new Date().toISOString().slice(0,10))}`,
+      `${rows.length} presenze · generato il ${fmtDate(dateToYmd(new Date()))}`,
       ['Data','Corso','Note'],
       rows.map(p => [fmtDate(p.giorno), p.corso, p.note || '—'])
     );
@@ -4541,7 +4585,7 @@ function exportReportPresPdf() {
   if (!rows.length) return appAlert('Nessuna presenza da esportare.');
   openPrintTable(
     'Report presenze',
-    `${reportPresPeriodoLabel()} · ${rows.length} lezioni · generato il ${fmtDate(new Date().toISOString().slice(0,10))}`,
+    `${reportPresPeriodoLabel()} · ${rows.length} lezioni · generato il ${fmtDate(dateToYmd(new Date()))}`,
     ['Data','Corso','Presenti','Allievi','Note'],
     rows.map(r => [fmtDate(r.giorno), r.corso, r.allievi.length, r.allievi.join(', '), r.note || '—'])
   );
@@ -4659,7 +4703,7 @@ function reportIscRowHtml(r) {
     : `<td style="text-align:center;">${r.conLezioni ? r.fatte : dash}</td>
       <td style="text-align:center;font-weight:600;${r.conLezioni && r.rimanenti===0 ? 'color:#e05555' : ''}">${r.conLezioni ? r.rimanenti : dash}</td>`;
   return `<tr>
-      <td style="font-weight:500;cursor:pointer;" onclick="apriRiepilogoAllievo('${escHtml(r.allievo).replace(/'/g,"&#39;")}')" title="Apri riepilogo">
+      <td style="font-weight:500;cursor:pointer;" onclick="apriRiepilogoAllievo(${jsArg(r.allievo)})" title="Apri riepilogo">
         <span style="color:var(--accent);text-decoration:underline;text-underline-offset:3px;">${escHtml(r.allievo)}</span>
       </td>
       <td>${corsiDisplayHtml(r.corsi, r.abbonamento)}</td>
@@ -4802,7 +4846,7 @@ function exportReportIscPdf() {
   if (!righe.length) return appAlert('Nessuna iscrizione da esportare.');
   openPrintTable(
     'Report iscrizioni',
-    `${reportIscPeriodoLabel()} · ${righe.length} iscrizioni · generato il ${fmtDate(new Date().toISOString().slice(0,10))}`,
+    `${reportIscPeriodoLabel()} · ${righe.length} iscrizioni · generato il ${fmtDate(dateToYmd(new Date()))}`,
     ['Allievo','Corsi','Abbonamento','Tipo','Iscrizione','Scadenza','Pagato','Data pag.','Fatte','Rimanenti'],
     righe.map(r => {
       const [fatteTxt, rimTxt] = reportIscLezioniTesto(r, '—');
@@ -4855,6 +4899,12 @@ function donutColors() {
 // ── UTILITY ──────────────────────────────────────────────
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Stringa come argomento JS dentro un attributo onclick="…": letterale JSON
+// (gestisce apostrofi, es. D'Angelo) poi escape HTML per l'attributo
+function jsArg(s) {
+  return escHtml(JSON.stringify(String(s ?? '')));
 }
 
 // Scarica righe già formattate come file CSV (BOM per Excel)
