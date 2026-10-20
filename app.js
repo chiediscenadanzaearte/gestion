@@ -3,7 +3,7 @@
    ═══════════════════════════════════════════════════════ */
 
 // ── CONFIGURAZIONE ───────────────────────────────────────
-import { auth, requireAuth, fsLoad, fsAdd, fsAddMany, fsUpdate, fsDelete, signOut } from './db.js?v=24';
+import { auth, requireAuth, fsLoad, fsAdd, fsAddMany, fsUpdate, fsDelete, fsDeleteMany, signOut } from './db.js?v=25';
 
 const COLL_SPESE       = 'spese';
 const COLL_CORSI       = 'corsi';
@@ -132,7 +132,7 @@ const MOBILE_COLS = {
   repIscTable:     { keep: [1, 2, 10] },  // Allievo, Corso, Rimanenti
   riepIscTable:    { keep: [3, 6, 9] },   // Corso, Costo, Rimaste
   riepStoricoTable:{ keep: [1, 2] },      // Data, Corso (Note col tap)
-  presTabellaTable:{ keep: [1, 2, 4] },   // selezione, Data, Corso
+  presTabellaTable:{ keep: [1, 3, 4] },   // Data, Corso, Presenti
 };
 
 function initMobileTables() {
@@ -154,55 +154,64 @@ function initMobileTables() {
   style.textContent = css;
   document.head.appendChild(style);
 
-  // tap sulla riga → riga di dettaglio con le colonne nascoste
+  // tap sulla riga → riga di dettaglio con le colonne nascoste (una alla volta).
+  // Le tabelle con azioni di gruppo gestiscono il tap da sé: lì il tap seleziona
+  // la riga e il dettaglio segue la selezione (vedi initBulkActions).
   document.addEventListener('click', e => {
     if (window.innerWidth > 768) return;
     const tr = e.target.closest('tr');
     if (!tr || tr.closest('thead') || tr.classList.contains('m-detail')) return;
     const table = tr.closest('table');
     const profile = table?.dataset.mobileCols;
-    if (!profile || !MOBILE_COLS[profile]) return;
+    if (!profile || !MOBILE_COLS[profile] || table.dataset.bulk) return;
     if (e.target.closest('[onclick], button, a, input, select')) return;
 
-    const next = tr.nextElementSibling;
-    if (next && next.classList.contains('m-detail')) {
-      next.remove();
-      tr.classList.remove('m-open');
-      return;
-    }
-    table.querySelectorAll('tr.m-detail').forEach(x => x.remove());
-    table.querySelectorAll('tr.m-open').forEach(x => x.classList.remove('m-open'));
-
-    const keep = MOBILE_COLS[profile].keep;
-    const ths  = [...table.querySelectorAll('thead th')];
-    const dataRows = [];
-    let actionsHtml = '';
-    [...tr.children].forEach((td, i) => {
-      if (keep.includes(i + 1)) return;
-      const val = td.innerHTML.trim();
-      if (!val) return;
-      // le celle coi bottoni azione si accodano all'ultima riga di dati
-      if (td.querySelector('.btn-table')) { actionsHtml += val; return; }
-      const label = (ths[i]?.textContent || '').replace(/[↕↑↓]/g, '').trim();
-      dataRows.push(`<div class="m-detail-row">${label ? `<span class="m-detail-label">${escHtml(label)}</span>` : ''}<span class="m-detail-val">${val}</span></div>`);
-    });
-    if (!dataRows.length && !actionsHtml) return;
-
-    if (actionsHtml) {
-      const acts = `<span class="m-detail-acts">${actionsHtml}</span>`;
-      if (dataRows.length) {
-        dataRows[dataRows.length - 1] = dataRows[dataRows.length - 1].replace(/<\/div>$/, `${acts}</div>`);
-      } else {
-        dataRows.push(`<div class="m-detail-row">${acts}</div>`);
-      }
-    }
-
-    const det = document.createElement('tr');
-    det.className = 'm-detail';
-    det.innerHTML = `<td colspan="${keep.length}">${dataRows.join('')}</td>`;
-    tr.classList.add('m-open');
-    tr.after(det);
+    const aperta = tr.classList.contains('m-open');
+    table.querySelectorAll('tr.m-open').forEach(x => mobileDetail(x, false));
+    if (!aperta) mobileDetail(tr, true);
   });
+}
+
+// Apre/chiude sotto la riga il dettaglio con le colonne nascoste su mobile
+function mobileDetail(tr, apri) {
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('m-detail')) next.remove();
+  tr.classList.remove('m-open');
+  if (!apri) return;
+
+  const table = tr.closest('table');
+  const profile = table?.dataset.mobileCols;
+  if (!profile || !MOBILE_COLS[profile]) return;
+
+  const keep = MOBILE_COLS[profile].keep;
+  const ths  = [...table.querySelectorAll('thead th')];
+  const dataRows = [];
+  let actionsHtml = '';
+  [...tr.children].forEach((td, i) => {
+    if (keep.includes(i + 1)) return;
+    const val = td.innerHTML.trim();
+    if (!val) return;
+    // le celle coi bottoni azione si accodano all'ultima riga di dati
+    if (td.querySelector('.btn-table')) { actionsHtml += val; return; }
+    const label = (ths[i]?.textContent || '').replace(/[↕↑↓]/g, '').trim();
+    dataRows.push(`<div class="m-detail-row">${label ? `<span class="m-detail-label">${escHtml(label)}</span>` : ''}<span class="m-detail-val">${val}</span></div>`);
+  });
+  if (!dataRows.length && !actionsHtml) return;
+
+  if (actionsHtml) {
+    const acts = `<span class="m-detail-acts">${actionsHtml}</span>`;
+    if (dataRows.length) {
+      dataRows[dataRows.length - 1] = dataRows[dataRows.length - 1].replace(/<\/div>$/, `${acts}</div>`);
+    } else {
+      dataRows.push(`<div class="m-detail-row">${acts}</div>`);
+    }
+  }
+
+  const det = document.createElement('tr');
+  det.className = 'm-detail';
+  det.innerHTML = `<td colspan="${keep.length}">${dataRows.join('')}</td>`;
+  tr.classList.add('m-open');
+  tr.after(det);
 }
 
 // ── TABELLE ORDINABILI (delegato, copre tutte le .data-table) ──
@@ -270,6 +279,153 @@ function initSortableTables() {
   });
 }
 
+// ── AZIONI DI GRUPPO (tabelle con data-bulk="<chiave>") ──
+// Clic sulla riga = la seleziona/deseleziona (Maiusc+clic: un intervallo).
+// Con almeno una riga selezionata compare il pannello fluttuante con
+// Modifica (solo con una riga), Elimina (anche multipla) e Seleziona tutte.
+// I clic su link/pulsanti dentro la riga (es. nome → riepilogo) non selezionano.
+// Nelle viste raggruppate una stessa voce può comparire in più gruppi:
+// le sue righe restano allineate e conta una volta sola.
+
+const BULK_TABLES = {
+  spese:      { etichetta: ['voce selezionata', 'voci selezionate'],             modifica: openEdit,           elimina: deleteRow },
+  allievi:    { etichetta: ['allievo selezionato', 'allievi selezionati'],       modifica: openEditAllievo,    elimina: deleteAllievo },
+  corsi:      { etichetta: ['corso selezionato', 'corsi selezionati'],           modifica: openEditCorso,      elimina: deleteCorso },
+  personale:  { etichetta: ['membro selezionato', 'membri selezionati'],         modifica: openEditPersonale,  elimina: deletePersonale },
+  iscrizioni: { etichetta: ['iscrizione selezionata', 'iscrizioni selezionate'], modifica: openEditIscrizione, elimina: deleteIscrizione },
+  presenze:   { etichetta: ['lezione selezionata', 'lezioni selezionate'],       modifica: openEditPresenza,   elimina: deletePresenza },
+};
+
+// contenitore con data-bulk (una tabella o, per l'elenco presenze, un div) e,
+// dentro, le righe selezionabili con data-bulk-id (<tr> o blocchi <div>)
+const BULK_RIGA = '[data-bulk] [data-bulk-id]';
+let bulkUltima = null; // ultima riga cliccata, punto di partenza per Maiusc+clic
+
+// righe selezionabili visibili nella sezione corrente (es. Corsi e Abbonamenti
+// sono sotto-schede della stessa sezione: conta solo quella mostrata)
+function bulkRighe() {
+  return [...document.querySelectorAll(`.section.active ${BULK_RIGA}`)].filter(tr => tr.offsetParent !== null);
+}
+
+function bulkSelezione() {
+  const sel = bulkRighe().filter(tr => tr.classList.contains('bulk-selected'));
+  return {
+    chiave: sel[0]?.closest('[data-bulk]').dataset.bulk || null,
+    ids: [...new Set(sel.map(tr => tr.dataset.bulkId))],
+  };
+}
+
+function bulkSeleziona(ids, stato) {
+  const set = new Set(ids);
+  const mobile = window.innerWidth <= 768;
+  bulkRighe().forEach(tr => {
+    if (!set.has(tr.dataset.bulkId) || tr.classList.contains('bulk-selected') === stato) return;
+    tr.classList.toggle('bulk-selected', stato);
+    // su mobile il dettaglio con le colonne nascoste segue la selezione
+    if (mobile) mobileDetail(tr, stato);
+  });
+}
+
+function bulkAzzera() {
+  document.querySelectorAll('[data-bulk] .bulk-selected').forEach(tr => {
+    tr.classList.remove('bulk-selected');
+    if (tr.classList.contains('m-open')) mobileDetail(tr, false);
+  });
+  bulkUltima = null;
+  bulkAggiorna();
+}
+
+function bulkAggiorna() {
+  const bar = $('bulkBar');
+  const { chiave, ids } = bulkSelezione();
+  if (!ids.length) { bar.classList.remove('open'); return; }
+  const cfg = BULK_TABLES[chiave];
+  const tot = new Set(bulkRighe().map(tr => tr.dataset.bulkId)).size;
+  $('bulkCount').textContent = `${ids.length} ${cfg.etichetta[ids.length === 1 ? 0 : 1]}`;
+  $('bulkAll').style.display = ids.length < tot ? '' : 'none';
+  $('bulkEdit').disabled = ids.length !== 1;
+  $('bulkEdit').title = ids.length === 1 ? 'Modifica' : 'Seleziona una sola riga per modificarla';
+  bar.classList.add('open');
+}
+
+function initBulkActions() {
+  // Maiusc+clic seleziona un intervallo: evita che selezioni anche il testo
+  document.addEventListener('mousedown', e => {
+    if (e.shiftKey && e.target.closest(BULK_RIGA)) e.preventDefault();
+  });
+
+  document.addEventListener('click', e => {
+    const tr = e.target.closest(BULK_RIGA);
+    if (!tr || e.target.closest('[onclick], a, button, input, select, label')) return;
+    const stato = !tr.classList.contains('bulk-selected');
+    let ids = [tr.dataset.bulkId];
+    // intervallo nello stesso contenitore (l'elenco presenze ha un gruppo per giorno)
+    const cont = tr.closest('[data-bulk]');
+    if (e.shiftKey && bulkUltima?.isConnected && bulkUltima.closest('[data-bulk]') === cont) {
+      const righe = [...cont.querySelectorAll('[data-bulk-id]')];
+      const [da, a] = [righe.indexOf(bulkUltima), righe.indexOf(tr)].sort((x, y) => x - y);
+      ids = righe.slice(da, a + 1).map(r => r.dataset.bulkId);
+    }
+    bulkSeleziona(ids, stato);
+    bulkUltima = tr;
+    bulkAggiorna();
+  });
+
+  // Esc annulla la selezione (se non c'è una modale aperta: lì Esc chiude la modale)
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape' || !$('bulkBar').classList.contains('open')) return;
+    if ([...document.querySelectorAll('.modal-overlay')].some(m => m.style.display === 'flex')) return;
+    bulkAzzera();
+  });
+
+  $('bulkAll').addEventListener('click', () => {
+    bulkSeleziona(bulkRighe().map(tr => tr.dataset.bulkId), true);
+    bulkAggiorna();
+  });
+
+  $('bulkEdit').addEventListener('click', () => {
+    const { chiave, ids } = bulkSelezione();
+    if (ids.length !== 1) return;
+    bulkAzzera();
+    BULK_TABLES[chiave].modifica(ids[0]);
+  });
+  // se l'eliminazione avviene la tabella si rigenera (e la selezione sparisce);
+  // se viene annullata la selezione resta com'era
+  $('bulkDelete').addEventListener('click', () => {
+    const { chiave, ids } = bulkSelezione();
+    if (ids.length) BULK_TABLES[chiave].elimina(ids);
+  });
+  $('bulkClose').addEventListener('click', bulkAzzera);
+
+  // le tabelle si rigenerano in molti punti (filtri, raggruppamenti, salvataggi):
+  // invece di agganciarsi a ognuno, si ricalcola il pannello a ogni cambio del DOM
+  // (anche di visibilità: cambio sotto-scheda, tabella nascosta)
+  let pending = false;
+  new MutationObserver(() => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; bulkAggiorna(); });
+  }).observe($('main') || document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+}
+
+// Conferma unica + eliminazione in batch; true se è andata a buon fine
+async function confermaEdElimina(coll, ids, msg) {
+  if (!ids.length || !await appConfirm(msg)) return false;
+  try {
+    await fsDeleteMany(coll, ids);
+    return true;
+  } catch (e) {
+    appAlert('Errore durante l\'eliminazione.');
+    return false;
+  }
+}
+
+// elenco puntato breve (max 5 nomi, poi "…e altri N") per i messaggi di conferma
+function elencoBreve(nomi, max = 5) {
+  const visibili = nomi.slice(0, max).map(n => `• ${n}`).join('\n');
+  return nomi.length > max ? `${visibili}\n…e altri ${nomi.length - max}` : visibili;
+}
+
 function initDialog() {
   $('dialogOk').addEventListener('click', () => closeDialog(true));
   $('dialogCancel').addEventListener('click', () => closeDialog(false));
@@ -335,6 +491,7 @@ async function loadAllievi() {
     tipo: r.tipo || '',
     tesseramento: normalizzaTesseramento(r),
     tesseramentoScad: r.tesseramentoScad || '',
+    dataNascita: r.dataNascita || '',
     cellulare: r.cellulare || '',
     mail: r.mail || '',
     indirizzo: r.indirizzo || '',
@@ -456,6 +613,7 @@ async function loadPresenze() {
 const sections = ['dashboard','inserimento','elenco','annuale','generale','tabelle','allievi','corsi','personale','iscrizioni','presenze','riepilogo-allievo','compensi','nota-mensile','report-presenze','report-iscrizioni'];
 
 function showSection(name) {
+  bulkAzzera(); // la selezione non sopravvive al cambio di sezione
   sections.forEach(s => { $('sec-'+s)?.classList.remove('active'); });
   document.querySelectorAll('[data-section]').forEach(el => {
     el.classList.toggle('active', el.dataset.section === name);
@@ -514,10 +672,36 @@ function renderDashboard() {
   $('kpiSaldo').className     = 'kpi-value ' + (saldo >= 0 ? 'kpi-green' : 'kpi-red');
   $('kpiCassa').textContent   = fmt(calcCassaCorrente());
 
+  renderDashCompleanni();
   renderDashDaSaldare();
   renderDashProssime();
   renderDashScadenze();
   renderChartDash();
+}
+
+// Striscia "compleanni di oggi" sopra i KPI; nascosta se nessuno compie gli anni.
+// I nati il 29 febbraio, negli anni non bisestili, si festeggiano il 28.
+function renderDashCompleanni() {
+  const el = $('dashCompleanni');
+  const oggi = new Date();
+  const anno = oggi.getFullYear(), mese = oggi.getMonth(), giorno = oggi.getDate();
+  const bisestile = new Date(anno, 1, 29).getMonth() === 1;
+
+  const festeggiati = allieviData.filter(a => {
+    const n = ymdToDate(a.dataNascita);
+    if (!n) return false;
+    if (n.getMonth() === 1 && n.getDate() === 29 && !bisestile) return mese === 1 && giorno === 28;
+    return n.getMonth() === mese && n.getDate() === giorno;
+  });
+
+  if (!festeggiati.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+
+  el.innerHTML = `<span>🎂 Oggi ${festeggiati.length > 1 ? 'compiono' : 'compie'} gli anni:</span>` + festeggiati.map(a => {
+    const eta = anno - ymdToDate(a.dataNascita).getFullYear();
+    return `<span><span class="dash-bday-nome" onclick="apriRiepilogoAllievo(${jsArg(a.nomeCompleto)})">${escHtml(a.nomeCompleto)}</span>`
+      + (eta > 0 ? ` <span class="dash-bday-eta">(${eta} anni)</span>` : '') + '</span>';
+  }).join('<span class="dash-bday-eta">·</span>');
+  el.style.display = '';
 }
 
 function renderDashDaSaldare() {
@@ -1138,23 +1322,13 @@ function applyFilters() {
   empty.style.display='none'; table.style.display='';
 
   tbody.innerHTML = filtered.map(r => `
-    <tr>
+    <tr data-bulk-id="${r._id}">
       <td>${fmtDate(r.data)}</td>
       <td>${escHtml(r.descrizione)}</td>
       <td><span class="badge badge-gray">${escHtml(r.categoria)}</span></td>
       <td><span class="badge ${r.tipo==='Entrate'?'badge-green':'badge-red'}">${r.tipo}</span></td>
       <td style="text-align:right;font-variant-numeric:tabular-nums;">${fmt(r.costo)}</td>
       <td style="color:var(--text-muted)">${escHtml(r.pagamento)}</td>
-      <td>
-        <div style="display:flex;gap:4px;">
-          <button class="btn-table" onclick="openEdit('${r._id}')" title="Modifica">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M8.5 1.5l2 2L4 10H2v-2L8.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-          </button>
-          <button class="btn-table btn-del" onclick="deleteRow('${r._id}')" title="Elimina">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M4 3v6M8 3v6M3 3l.5 7h5L9 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-        </div>
-      </td>
     </tr>
   `).join('');
 }
@@ -1267,15 +1441,15 @@ async function saveEdit() {
   }
 }
 
-async function deleteRow(id) {
-  if (!await appConfirm('Eliminare questa voce?')) return;
-  try {
-    await fsDelete(COLL_SPESE, id);
-    speseData = speseData.filter(r => r._id !== id);
-    applyFilters();
-  } catch (e) {
-    appAlert('Errore durante l\'eliminazione.');
-  }
+async function deleteRow(idOrIds) {
+  const ids = [].concat(idOrIds);
+  const msg = ids.length === 1
+    ? 'Eliminare questa voce?'
+    : `Eliminare ${ids.length} voci?\nQuesta operazione non può essere annullata.`;
+  if (!await confermaEdElimina(COLL_SPESE, ids, msg)) return;
+  const del = new Set(ids);
+  speseData = speseData.filter(r => !del.has(r._id));
+  applyFilters();
 }
 
 // ── RIEPILOGO ANNUALE ─────────────────────────────────────
@@ -1849,20 +2023,18 @@ function applyAllieviFilters() {
 }
 
 const ALLIEVI_THEAD = `<colgroup>
-  <col style="width:24%"><col style="width:13%"><col style="width:13%">
-  <col style="width:14%"><col style="width:18%"><col style="width:18%">
-  <col style="width:72px">
+  <col style="width:25%"><col style="width:13%"><col style="width:14%">
+  <col style="width:15%"><col style="width:19%"><col style="width:19%">
 </colgroup><thead><tr>
   <th>Nome completo</th><th>Tipo</th><th>Tesseramento</th>
   <th>Cellulare</th><th>Mail</th><th>Note</th>
-  <th style="width:72px"></th>
 </tr></thead>`;
 
 function allievoRowHtml(r) {
   const c = getTipoColor(r.tipo);
   const badgeStyle = `background:${c.bg};border:1px solid ${c.border};color:${c.text};display:inline-flex;align-items:center;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:500;`;
   // nome cliccabile → riepilogo allievo
-  return `<tr>
+  return `<tr data-bulk-id="${r._id}">
       <td style="font-weight:500;cursor:pointer;" onclick="apriRiepilogoAllievo(${jsArg(r.nomeCompleto)})" title="Apri riepilogo">
         <span style="color:var(--accent);text-decoration:underline;text-underline-offset:3px;">${escHtml(r.nomeCompleto)}</span>
       </td>
@@ -1871,16 +2043,6 @@ function allievoRowHtml(r) {
       <td style="color:var(--text-muted)">${escHtml(r.cellulare)}</td>
       <td style="color:var(--text-muted)">${escHtml(r.mail)}</td>
       <td style="color:var(--text-dim);font-size:12px;">${escHtml(r.note)}</td>
-      <td>
-        <div style="display:flex;gap:4px;">
-          <button class="btn-table" onclick="openEditAllievo('${r._id}')" title="Modifica">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M8.5 1.5l2 2L4 10H2v-2L8.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-          </button>
-          <button class="btn-table btn-del" onclick="deleteAllievo('${r._id}')" title="Elimina">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M4 3v6M8 3v6M3 3l.5 7h5L9 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-        </div>
-      </td>
     </tr>`;
 }
 
@@ -1890,7 +2052,7 @@ function renderAllieviTables(filtered) {
 
   if (!raggruppa) {
     wrap.innerHTML = `<div class="table-wrap">
-      <table class="data-table" id="allieviTable" data-mobile-cols="allieviTable">${ALLIEVI_THEAD}
+      <table class="data-table" id="allieviTable" data-mobile-cols="allieviTable" data-bulk="allievi">${ALLIEVI_THEAD}
         <tbody id="allieviBody">${filtered.map(allievoRowHtml).join('')}</tbody>
       </table>
     </div>`;
@@ -1913,7 +2075,7 @@ function renderAllieviTables(filtered) {
     <div class="card" style="margin-bottom:16px;">
       <div class="card-title">${k === '__none__' ? 'Senza tipo' : escHtml(k)} <span style="color:var(--text-dim);font-weight:400;">(${gruppi[k].length})</span></div>
       <div class="table-wrap" style="margin-top:0;">
-        <table class="data-table" data-mobile-cols="allieviTable">${ALLIEVI_THEAD}
+        <table class="data-table" data-mobile-cols="allieviTable" data-bulk="allievi">${ALLIEVI_THEAD}
           <tbody>${gruppi[k].map(allievoRowHtml).join('')}</tbody>
         </table>
       </div>
@@ -1940,7 +2102,7 @@ function updateTesseramentoScadGroup(prefillIfEmpty) {
 function openNewAllievo() {
   editAllieviIdx = null;
   $('modalAllieviTitle').textContent = 'Nuovo allievo';
-  ['aCognome','aNome','aCellulare','aMail','aIndirizzo','aNote'].forEach(id => { $(id).value=''; });
+  ['aCognome','aNome','aDataNascita','aCellulare','aMail','aIndirizzo','aNote'].forEach(id => { $(id).value=''; });
   $('aTesseramento').value = 'No';
   $('aTesseramentoScad').value = '';
   updateTesseramentoScadGroup(false);
@@ -1956,6 +2118,7 @@ function openEditAllievo(id) {
   $('modalAllieviTitle').textContent = 'Modifica allievo';
   $('aCognome').value      = r.cognome;
   $('aNome').value         = r.nome;
+  $('aDataNascita').value = r.dataNascita || '';
   $('aTesseramento').value = isTesserato(r.tesseramento) ? 'Sì' : 'No';
   $('aTesseramentoScad').value = r.tesseramentoScad || '';
   updateTesseramentoScadGroup(false);
@@ -1972,6 +2135,7 @@ function closeAllieviModal() { $('modalAllieviOverlay').style.display = 'none'; 
 async function saveAllievo() {
   const cognome     = $('aCognome').value.trim();
   const nome        = $('aNome').value.trim();
+  const dataNascita = $('aDataNascita').value;
   const tipo        = $('aTipo').value.trim();
   const tesseramento= $('aTesseramento').value.trim();
   const tesseramentoScad = tesseramento === 'Sì' ? $('aTesseramentoScad').value : '';
@@ -1983,7 +2147,7 @@ async function saveAllievo() {
 
   if (!cognome && !nome) return appAlert('Inserisci almeno cognome o nome.');
 
-  const docData = { cognome, nome, nomeCompleto, tipo, tesseramento, tesseramentoScad, cellulare, mail, indirizzo, note };
+  const docData = { cognome, nome, nomeCompleto, dataNascita, tipo, tesseramento, tesseramentoScad, cellulare, mail, indirizzo, note };
 
   try {
     const isNuovo = editAllieviIdx === null;
@@ -1998,6 +2162,7 @@ async function saveAllievo() {
     closeAllieviModal();
     applyAllieviFilters();
     refreshRiepilogoIfActive();
+    if ($('sec-dashboard')?.classList.contains('active')) renderDashCompleanni();
 
     // nuovo allievo → proponi subito l'iscrizione
     if (isNuovo && await appConfirm(`Allievo "${nomeCompleto}" salvato.\nVuoi procedere subito con l'iscrizione?`)) {
@@ -2011,18 +2176,16 @@ async function saveAllievo() {
   }
 }
 
-async function deleteAllievo(id) {
-  const r = allieviData.find(r => r._id === id);
-  if (!r) return;
-  const ok = await appConfirm(`Eliminare l'allievo "${r.nomeCompleto}"?\nQuesta operazione non può essere annullata.`);
-  if (!ok) return;
-  try {
-    await fsDelete(COLL_ALLIEVI, id);
-    allieviData = allieviData.filter(r => r._id !== id);
-    applyAllieviFilters();
-  } catch (e) {
-    appAlert('Errore durante l\'eliminazione.');
-  }
+async function deleteAllievo(idOrIds) {
+  const sel = allieviData.filter(r => [].concat(idOrIds).includes(r._id));
+  if (!sel.length) return;
+  const msg = sel.length === 1
+    ? `Eliminare l'allievo "${sel[0].nomeCompleto}"?\nQuesta operazione non può essere annullata.`
+    : `Eliminare ${sel.length} allievi?\n${elencoBreve(sel.map(r => r.nomeCompleto))}\nQuesta operazione non può essere annullata.`;
+  if (!await confermaEdElimina(COLL_ALLIEVI, sel.map(r => r._id), msg)) return;
+  const del = new Set(sel.map(r => r._id));
+  allieviData = allieviData.filter(r => !del.has(r._id));
+  applyAllieviFilters();
 }
 
 // ── CORSI (semplificati: nome, durata, abbonamenti ammessi) ──
@@ -2030,11 +2193,9 @@ let editCorsoId = null;
 let corsiSubTab = 'corsi'; // 'corsi' | 'abbonamenti'
 
 const CORSI_THEAD = `<colgroup>
-  <col style="width:26%"><col style="width:16%"><col style="width:38%">
-  <col style="width:70px">
+  <col style="width:30%"><col style="width:18%"><col style="width:auto">
 </colgroup><thead><tr>
   <th>Nome</th><th>Durata</th><th>Tipo di abbonamento</th>
-  <th style="width:70px"></th>
 </tr></thead>`;
 
 // Colori stabili per corso (in ordine alfabetico, come corsiData), usati nel
@@ -2078,20 +2239,10 @@ function corsoRowHtml(c) {
         return `<span style="background:${cc.bg};border:1px solid ${cc.border};color:${cc.text};display:inline-flex;align-items:center;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:500;">${escHtml(nome)}</span>`;
       }).join('')}</div>`
     : '<span style="color:var(--text-dim);font-style:italic;">Tutti</span>';
-  return `<tr>
+  return `<tr data-bulk-id="${c._id}">
       <td style="font-weight:500">${escHtml(c.nome)}</td>
       <td style="color:var(--text-muted)">${escHtml(c.durata) || dash}</td>
       <td>${abbonamentiCell}</td>
-      <td>
-        <div style="display:flex;gap:4px;">
-          <button class="btn-table" onclick="openEditCorso('${c._id}')" title="Modifica">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M8.5 1.5l2 2L4 10H2v-2L8.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-          </button>
-          <button class="btn-table btn-del" onclick="deleteCorso('${c._id}')" title="Elimina">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M4 3v6M8 3v6M3 3l.5 7h5L9 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-        </div>
-      </td>
     </tr>`;
 }
 
@@ -2112,7 +2263,7 @@ function renderCorsiTables() {
 
   if (!raggruppa) {
     wrap.innerHTML = `<div class="table-wrap">
-      <table class="data-table" id="corsiTable" data-mobile-cols="corsiTable">${CORSI_THEAD}
+      <table class="data-table" id="corsiTable" data-mobile-cols="corsiTable" data-bulk="corsi">${CORSI_THEAD}
         <tbody id="corsiBody">${corsiData.map(corsoRowHtml).join('')}</tbody>
       </table>
     </div>`;
@@ -2144,7 +2295,7 @@ function renderCorsiTables() {
     <div class="card" style="margin-bottom:16px;">
       <div class="card-title">${(k === '__none__' || k === '__tutti__') ? etichetta : escHtml(k)}</div>
       <div class="table-wrap" style="margin-top:0;">
-        <table class="data-table" data-mobile-cols="corsiTable">${CORSI_THEAD}
+        <table class="data-table" data-mobile-cols="corsiTable" data-bulk="corsi">${CORSI_THEAD}
           <tbody>${gruppi[k].map(corsoRowHtml).join('')}</tbody>
         </table>
       </div>
@@ -2228,21 +2379,23 @@ async function saveCorso() {
   }
 }
 
-async function deleteCorso(id) {
-  const c = corsiData.find(c => c._id === id);
-  if (!c) return;
-  const usato = iscrizioniData.some(r => r.corsi.includes(c.nome)) || presenzeData.some(r => r.corso === c.nome);
-  const msg = usato
-    ? `Il corso "${c.nome}" ha iscrizioni o presenze registrate (che NON verranno cancellate).\nEliminarlo comunque?`
-    : `Eliminare il corso "${c.nome}"?`;
-  if (!await appConfirm(msg)) return;
-  try {
-    await fsDelete(COLL_CORSI, id);
-    corsiData = corsiData.filter(c => c._id !== id);
-    renderCorsi();
-  } catch (e) {
-    appAlert('Errore durante l\'eliminazione.');
+async function deleteCorso(idOrIds) {
+  const sel = corsiData.filter(c => [].concat(idOrIds).includes(c._id));
+  if (!sel.length) return;
+  const usati = sel.filter(c => iscrizioniData.some(r => r.corsi.includes(c.nome)) || presenzeData.some(r => r.corso === c.nome));
+  let msg;
+  if (sel.length === 1) {
+    msg = usati.length
+      ? `Il corso "${sel[0].nome}" ha iscrizioni o presenze registrate (che NON verranno cancellate).\nEliminarlo comunque?`
+      : `Eliminare il corso "${sel[0].nome}"?`;
+  } else {
+    msg = `Eliminare ${sel.length} corsi?\n${elencoBreve(sel.map(c => c.nome))}`
+      + (usati.length ? `\n\n${usati.length === 1 ? 'Uno ha' : `${usati.length} hanno`} iscrizioni o presenze registrate (che NON verranno cancellate).` : '');
   }
+  if (!await confermaEdElimina(COLL_CORSI, sel.map(c => c._id), msg)) return;
+  const del = new Set(sel.map(c => c._id));
+  corsiData = corsiData.filter(c => !del.has(c._id));
+  renderCorsi();
 }
 
 // ── ABBONAMENTI (solo pagamento: prezzi a pacchetti o a scadenza; i corsi si scelgono in iscrizione) ──
@@ -2553,19 +2706,9 @@ async function renderPersonale() {
   $('personaleTableWrap').style.display='';
 
   $('personaleBody').innerHTML = personaleData.map(p => `
-    <tr>
+    <tr data-bulk-id="${p._id}">
       <td style="font-weight:500">${escHtml(p.cognome)}</td>
       <td>${escHtml(p.nome)}</td>
-      <td>
-        <div style="display:flex;gap:4px;">
-          <button class="btn-table" onclick="openEditPersonale('${p._id}')" title="Modifica">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M8.5 1.5l2 2L4 10H2v-2L8.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-          </button>
-          <button class="btn-table btn-del" onclick="deletePersonale('${p._id}')" title="Elimina">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M4 3v6M8 3v6M3 3l.5 7h5L9 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-        </div>
-      </td>
     </tr>`).join('');
 }
 
@@ -2614,21 +2757,23 @@ async function savePersonale() {
   }
 }
 
-async function deletePersonale(id) {
-  const p = personaleData.find(p => p._id === id);
-  if (!p) return;
-  const usato = speseData.some(r => r.personale === p.nomeCompleto);
-  const msg = usato
-    ? `"${p.nomeCompleto}" ha contributi registrati (che NON verranno cancellati).\nEliminarlo comunque?`
-    : `Eliminare "${p.nomeCompleto}"?`;
-  if (!await appConfirm(msg)) return;
-  try {
-    await fsDelete(COLL_PERSONALE, id);
-    personaleData = personaleData.filter(p => p._id !== id);
-    renderPersonale();
-  } catch (e) {
-    appAlert('Errore durante l\'eliminazione.');
+async function deletePersonale(idOrIds) {
+  const sel = personaleData.filter(p => [].concat(idOrIds).includes(p._id));
+  if (!sel.length) return;
+  const usati = sel.filter(p => speseData.some(r => r.personale === p.nomeCompleto));
+  let msg;
+  if (sel.length === 1) {
+    msg = usati.length
+      ? `"${sel[0].nomeCompleto}" ha contributi registrati (che NON verranno cancellati).\nEliminarlo comunque?`
+      : `Eliminare "${sel[0].nomeCompleto}"?`;
+  } else {
+    msg = `Eliminare ${sel.length} membri del personale?\n${elencoBreve(sel.map(p => p.nomeCompleto))}`
+      + (usati.length ? `\n\n${usati.length === 1 ? 'Uno ha' : `${usati.length} hanno`} contributi registrati (che NON verranno cancellati).` : '');
   }
+  if (!await confermaEdElimina(COLL_PERSONALE, sel.map(p => p._id), msg)) return;
+  const del = new Set(sel.map(p => p._id));
+  personaleData = personaleData.filter(p => !del.has(p._id));
+  renderPersonale();
 }
 
 // ── ISCRIZIONI ────────────────────────────────────────────
@@ -2687,13 +2832,12 @@ function applyIscrizioniFilters() {
 }
 
 const ISCRIZIONI_THEAD = `<colgroup>
-  <col style="width:15%"><col style="width:9%"><col style="width:10%"><col style="width:11%">
-  <col style="width:13%"><col style="width:10%"><col style="width:7%"><col style="width:9%">
-  <col style="width:8%"><col style="width:72px">
+  <col style="width:16%"><col style="width:9%"><col style="width:10%"><col style="width:11%">
+  <col style="width:14%"><col style="width:10%"><col style="width:7%"><col style="width:9%">
+  <col style="width:auto">
 </colgroup><thead><tr>
   <th>Allievo</th><th>A.S.</th><th>Data</th><th>Tipo</th><th>Corsi</th>
   <th>Data pag.</th><th>Pagato</th><th style="text-align:right">Costo</th><th>Note</th>
-  <th style="width:72px"></th>
 </tr></thead>`;
 
 // Corso di un'iscrizione: vuoto per gli abbonamenti "mix" (valgono su qualsiasi corso)
@@ -2720,7 +2864,7 @@ function iscrizioneRowHtml(r) {
     ? '<span style="color:var(--text-dim)">—</span>'
     : `<span class="badge ${pag?'badge-green':'badge-red'}">${pag?'Sì':'No'}</span>`;
   const costoCell = isProva ? '<span style="color:var(--text-dim)">—</span>' : (r.costo?fmt(r.costo):'—');
-  return `<tr>
+  return `<tr data-bulk-id="${r._id}">
       <td style="font-weight:500;cursor:pointer;" onclick="apriRiepilogoAllievo(${jsArg(r.allievo)})" title="Apri riepilogo">
         <span style="color:var(--accent);text-decoration:underline;text-underline-offset:3px;">${escHtml(r.allievo)}</span>
       </td>
@@ -2732,16 +2876,6 @@ function iscrizioneRowHtml(r) {
       <td>${pagatoCell}</td>
       <td style="text-align:right;font-variant-numeric:tabular-nums">${costoCell}</td>
       <td style="font-size:12px;color:var(--text-muted)">${escHtml(r.note)}</td>
-      <td>
-        <div style="display:flex;gap:4px;">
-          <button class="btn-table" onclick="openEditIscrizione('${r._id}')" title="Modifica">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M8.5 1.5l2 2L4 10H2v-2L8.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-          </button>
-          <button class="btn-table btn-del" onclick="deleteIscrizione('${r._id}')" title="Elimina">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M4 3v6M8 3v6M3 3l.5 7h5L9 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-        </div>
-      </td>
     </tr>`;
 }
 
@@ -2751,7 +2885,7 @@ function renderIscrizioniTables(filtered) {
 
   if (!raggruppa) {
     wrap.innerHTML = `<div class="table-wrap">
-      <table class="data-table" id="iscrizioniTable" data-mobile-cols="iscrizioniTable">${ISCRIZIONI_THEAD}
+      <table class="data-table" id="iscrizioniTable" data-mobile-cols="iscrizioniTable" data-bulk="iscrizioni">${ISCRIZIONI_THEAD}
         <tbody id="iscrizioniBody">${filtered.map(iscrizioneRowHtml).join('')}</tbody>
       </table>
     </div>`;
@@ -2784,7 +2918,7 @@ function renderIscrizioniTables(filtered) {
     <div class="card" style="margin-bottom:16px;">
       <div class="card-title">${k === '__none__' ? etichettaNone : escHtml(k)} <span style="color:var(--text-dim);font-weight:400;">(${gruppi[k].length})</span></div>
       <div class="table-wrap" style="margin-top:0;">
-        <table class="data-table" data-mobile-cols="iscrizioniTable">${ISCRIZIONI_THEAD}
+        <table class="data-table" data-mobile-cols="iscrizioniTable" data-bulk="iscrizioni">${ISCRIZIONI_THEAD}
           <tbody>${gruppi[k].map(iscrizioneRowHtml).join('')}</tbody>
         </table>
       </div>
@@ -3157,18 +3291,18 @@ async function saveIscrizione() {
   }
 }
 
-async function deleteIscrizione(id) {
-  const r = iscrizioniData.find(r => r._id === id);
-  if (!r) return;
-  if (!await appConfirm(`Eliminare l'iscrizione di "${r.allievo}" — ${corsiDisplayText(r.corsi, 'nessun corso', r.abbonamento)} (${r.tipo})?\nL'operazione non può essere annullata.`)) return;
-  try {
-    await fsDelete(COLL_ISCRIZIONI, id);
-    iscrizioniData = iscrizioniData.filter(r => r._id !== id);
-    applyIscrizioniFilters();
-    refreshRiepilogoIfActive();
-  } catch (e) {
-    appAlert('Errore durante l\'eliminazione.');
-  }
+async function deleteIscrizione(idOrIds) {
+  const sel = iscrizioniData.filter(r => [].concat(idOrIds).includes(r._id));
+  if (!sel.length) return;
+  const descr = r => `${r.allievo} — ${corsiDisplayText(r.corsi, 'nessun corso', r.abbonamento)} (${r.tipo})`;
+  const msg = sel.length === 1
+    ? `Eliminare l'iscrizione di "${sel[0].allievo}" — ${corsiDisplayText(sel[0].corsi, 'nessun corso', sel[0].abbonamento)} (${sel[0].tipo})?\nL'operazione non può essere annullata.`
+    : `Eliminare ${sel.length} iscrizioni?\n${elencoBreve(sel.map(descr))}\nL'operazione non può essere annullata.`;
+  if (!await confermaEdElimina(COLL_ISCRIZIONI, sel.map(r => r._id), msg)) return;
+  const del = new Set(sel.map(r => r._id));
+  iscrizioniData = iscrizioniData.filter(r => !del.has(r._id));
+  applyIscrizioniFilters();
+  refreshRiepilogoIfActive();
 }
 
 // ── PRESENZE ─────────────────────────────────────────────
@@ -3351,25 +3485,17 @@ function renderPresElenco(el) {
   const giorni = Object.keys(byGiorno).sort((a,b)=>b.localeCompare(a));
 
   el.innerHTML = `
-    <div class="table-wrap">
+    <div class="table-wrap" data-bulk="presenze">
       ${giorni.map(giorno => `
         <div class="pres-elenco-day-group">
           <div class="pres-elenco-day-header">${fmtDate(giorno)}</div>
           ${byGiorno[giorno].map(r => {
             return `
-            <div class="pres-elenco-row">
+            <div class="pres-elenco-row" data-bulk-id="${r._id}">
               <div class="pres-elenco-main">
                 <div class="pres-elenco-date">${fmtDate(r.giorno)}${r.ora ? ` · ${r.ora}` : ''}</div>
                 <div class="pres-elenco-corso">${escHtml(r.corso)}</div>
                 <div class="pres-elenco-count" style="font-size:11px;color:var(--text-dim);margin-left:auto;white-space:nowrap;">${r.allievi.length} pres.</div>
-                <div class="pres-elenco-actions" style="display:flex;gap:4px;">
-                  <button class="btn-table" onclick="openEditPresenza('${r._id}')" title="Modifica">
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M8.5 1.5l2 2L4 10H2v-2L8.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-                  </button>
-                  <button class="btn-table btn-del" onclick="deletePresenza('${r._id}')" title="Elimina">
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M4 3v6M8 3v6M3 3l.5 7h5L9 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  </button>
-                </div>
               </div>
               <div class="pres-elenco-allievi">
                 ${r.allievi.map(a=>`<span class="pres-allievo-chip">${escHtml(a)}</span>`).join('')}
@@ -3380,103 +3506,41 @@ function renderPresElenco(el) {
     </div>`;
 }
 
-// ── VISTA TABELLA (con selezione multipla per eliminare più lezioni insieme) ──
+// ── VISTA TABELLA (selezione al clic sulla riga: azioni dal pannello di gruppo) ──
 function renderPresTabella(el) {
   const data = filteredPresenze().sort((a,b) => b.giorno.localeCompare(a.giorno) || (a.ora||'').localeCompare(b.ora||''));
   if (!data.length) { el.innerHTML = '<div class="table-empty">Nessuna presenza nel periodo selezionato.</div>'; return; }
 
   el.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px;">
+    <div style="margin-bottom:10px;">
       <span class="count-label">${data.length} lezioni</span>
-      <div id="presTabellaBulkBar" style="display:none;align-items:center;gap:10px;">
-        <span id="presTabellaSelCount" style="font-size:12px;color:var(--text-muted);"></span>
-        <button class="btn-secondary btn-del" id="btnPresTabellaDeleteSel">Elimina selezionate</button>
-      </div>
     </div>
     <div class="table-wrap">
-      <table class="data-table" id="presTabellaTable" data-mobile-cols="presTabellaTable">
+      <table class="data-table" id="presTabellaTable" data-mobile-cols="presTabellaTable" data-bulk="presenze">
         <colgroup>
-          <col style="width:36px"><col style="width:15%"><col style="width:10%"><col style="width:26%">
-          <col style="width:10%"><col style="width:auto"><col style="width:70px">
+          <col style="width:15%"><col style="width:10%"><col style="width:28%">
+          <col style="width:10%"><col style="width:auto">
         </colgroup>
         <thead>
           <tr>
-            <th><input type="checkbox" id="presTabSelectAll"></th>
             <th>Data</th><th>Ora</th><th>Corso</th>
             <th style="text-align:center">Presenti</th><th>Note</th>
-            <th style="width:70px"></th>
           </tr>
         </thead>
         <tbody id="presTabellaBody">
           ${data.map(r => {
             const cc = getCorsoColor(r.corso);
-            return `<tr>
-              <td><input type="checkbox" class="pres-tab-check" data-id="${r._id}"></td>
+            return `<tr data-bulk-id="${r._id}">
               <td style="white-space:nowrap;color:var(--text-muted);">${fmtDate(r.giorno)}</td>
               <td>${r.ora ? escHtml(r.ora) : '<span style="color:var(--text-dim)">—</span>'}</td>
               <td style="color:${cc.text};font-weight:500;">${escHtml(r.corso)}</td>
               <td style="text-align:center;">${r.allievi.length}</td>
               <td style="color:var(--text-dim);font-size:12px;">${r.note ? escHtml(r.note) : '—'}</td>
-              <td>
-                <div style="display:flex;gap:4px;">
-                  <button class="btn-table" onclick="openEditPresenza('${r._id}')" title="Modifica">
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M8.5 1.5l2 2L4 10H2v-2L8.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
-                  </button>
-                  <button class="btn-table btn-del" onclick="deletePresenza('${r._id}')" title="Elimina">
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M4 3v6M8 3v6M3 3l.5 7h5L9 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  </button>
-                </div>
-              </td>
             </tr>`;
           }).join('')}
         </tbody>
       </table>
     </div>`;
-
-  initPresTabellaBulkActions();
-}
-
-// Selezione multipla nella vista Tabella: spunta tutti/singoli e cancellazione
-// in blocco delle lezioni scelte (con le rispettive presenze registrate).
-function initPresTabellaBulkActions() {
-  const selectAll = document.getElementById('presTabSelectAll');
-  const bar = document.getElementById('presTabellaBulkBar');
-  const selCountEl = document.getElementById('presTabellaSelCount');
-  const getChecks = () => [...document.querySelectorAll('.pres-tab-check')];
-
-  const updateBar = () => {
-    const selected = getChecks().filter(c => c.checked);
-    if (selected.length > 0) {
-      bar.style.display = 'flex';
-      selCountEl.textContent = `${selected.length} selezionate`;
-    } else {
-      bar.style.display = 'none';
-    }
-    if (selectAll) {
-      const all = getChecks();
-      selectAll.checked = all.length > 0 && selected.length === all.length;
-      selectAll.indeterminate = selected.length > 0 && selected.length < all.length;
-    }
-  };
-
-  selectAll?.addEventListener('change', () => {
-    getChecks().forEach(c => { c.checked = selectAll.checked; });
-    updateBar();
-  });
-  getChecks().forEach(c => c.addEventListener('change', updateBar));
-
-  document.getElementById('btnPresTabellaDeleteSel')?.addEventListener('click', async () => {
-    const ids = getChecks().filter(c => c.checked).map(c => c.dataset.id);
-    if (!ids.length) return;
-    if (!await appConfirm(`Eliminare ${ids.length} lezioni selezionate?\nQuesta operazione non può essere annullata.`)) return;
-    try {
-      await Promise.all(ids.map(id => fsDelete(COLL_PRESENZE, id)));
-      presenzeData = presenzeData.filter(p => !ids.includes(p._id));
-      renderPresView();
-    } catch (e) {
-      appAlert('Errore durante l\'eliminazione di alcune lezioni.');
-    }
-  });
 }
 
 // Esporta in CSV le lezioni attualmente filtrate (stesso formato dell'import,
@@ -4124,17 +4188,17 @@ async function savePresenza() {
   }
 }
 
-async function deletePresenza(id) {
-  const r = presenzeData.find(r=>r._id===id);
-  if (!r) return;
-  if (!await appConfirm(`Eliminare la presenza del ${fmtDate(r.giorno)} — ${r.corso}?`)) return;
-  try {
-    await fsDelete(COLL_PRESENZE, id);
-    presenzeData = presenzeData.filter(r=>r._id!==id);
-    renderPresView();
-  } catch (e) {
-    appAlert('Errore durante l\'eliminazione.');
-  }
+async function deletePresenza(idOrIds) {
+  const sel = presenzeData.filter(r => [].concat(idOrIds).includes(r._id));
+  if (!sel.length) return;
+  const descr = r => `${fmtDate(r.giorno)}${r.ora ? ` ${r.ora}` : ''} — ${r.corso}`;
+  const msg = sel.length === 1
+    ? `Eliminare la presenza del ${fmtDate(sel[0].giorno)} — ${sel[0].corso}?`
+    : `Eliminare ${sel.length} lezioni con le rispettive presenze?\n${elencoBreve(sel.map(descr))}\nQuesta operazione non può essere annullata.`;
+  if (!await confermaEdElimina(COLL_PRESENZE, sel.map(r => r._id), msg)) return;
+  const del = new Set(sel.map(r => r._id));
+  presenzeData = presenzeData.filter(r => !del.has(r._id));
+  renderPresView();
 }
 
 // ══════════════════════════════════════════════════════════
@@ -5250,6 +5314,7 @@ async function init() {
   initDialog();
   initMobileTables();
   initSortableTables();
+  initBulkActions();
   await requireAuth();
 
   const savedTheme = localStorage.getItem('danza_theme') || 'dark';
@@ -5554,13 +5619,12 @@ async function init() {
 // Handler usati negli attributi onclick generati dai template:
 // app.js è un modulo ES, quindi vanno esposti su window.
 Object.assign(window, {
-  openEdit, deleteRow,
-  openEditAllievo, deleteAllievo,
-  openEditCorso, deleteCorso,
+  // spese, allievi, corsi, personale e iscrizioni si modificano/eliminano dal
+  // pannello delle azioni di gruppo; restano qui quelle ancora usate in onclick
+  openEditAllievo,
   openEditAbbonamento, deleteAbbonamento,
-  openEditPersonale, deletePersonale,
   openEditIscrizione, deleteIscrizione,
-  openEditPresenza, deletePresenza, openPresForDay,
+  openEditPresenza, openPresForDay,
   openPresDayChooser, closePresDayChooser,
   apriRiepilogoAllievo, apriNuovaIscrizionePerAllievo,
   toggleSelectAll, onPresCheck, removePresExtra, togglePresAccordion,
